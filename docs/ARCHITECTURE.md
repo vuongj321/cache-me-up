@@ -38,7 +38,7 @@ Before diving into the architecture, here are the two external concepts the syst
 
 A **cron job** is just *a task that runs automatically on a repeating schedule*.
 
-- "Cron" originally refers to the Unix/Linux utility `cron`, whose configuration uses a special syntax of five time fields. For example, `0 13 * * *` means "at minute 0, hour 13, every day, every month, every day of the week" — i.e. **13:00 (1:00 PM) every day**.
+- "Cron" originally refers to the Unix/Linux utility `cron`, whose configuration uses a special syntax of five time fields. For example, `0 11 * * *` means "at minute 0, hour 11, every day, every month, every day of the week" — i.e. **11:00 every day**.
 - You don't need a server running `cron` yourself here. Instead, **GitHub Actions** provides the scheduler. A workflow file in the repo declares the same `cron:` expression, and GitHub's infrastructure wakes up and runs the pipeline at that time.
 
 The key idea to remember: *the system does not need to be "always on."* GitHub Actions spins up a fresh, temporary virtual machine on schedule, runs the code once, and tears it down. This keeps the project free and serverless.
@@ -99,7 +99,7 @@ Each stage has a single responsibility, which makes the system easy to test and 
 
 ### Step 1 — Cron triggers the run
 
-At **13:00 UTC** (≈ 8:00 AM Central Time) each day, GitHub Actions starts the workflow. The run can also be triggered manually via the "Run workflow" button (`workflow_dispatch`).
+At **11:00 UTC** (5:00 AM CST) each day, GitHub Actions starts the workflow. The run can also be triggered manually via the "Run workflow" button (`workflow_dispatch`).
 
 See [GitHub Actions and scheduling](#7-github-actions-and-scheduling) for the full explanation of how this works.
 
@@ -268,10 +268,12 @@ GitHub Actions is a service that runs **workflows** (small programs described in
 
 For this project, the workflow file `.github/workflows/daily-digest.yml` declares two triggers:
 
-1. **Schedule (`cron`)** — `'0 13 * * *'`, i.e. daily at 13:00 UTC.
+1. **Schedule (`cron`)** — `'0 11 * * *'`, i.e. daily at 11:00 UTC (5:00 AM CST).
 2. **Manual (`workflow_dispatch`)** — a button in the GitHub UI to run on demand.
 
 > **Note on schedule accuracy:** GitHub does not guarantee cron workflows fire at the exact minute; they can be delayed (often by a few minutes to over an hour under load). The design therefore treats the time as "roughly daily," which is fine for a digest.
+
+> **Note on time zones:** GitHub schedules run in **UTC**, not local time. 5:00 AM CST (Central *Standard* Time, UTC−6) corresponds to **11:00 UTC**. If you instead want the digest at 5:00 AM *local wall-clock time* year-round, keep in mind that Central observes Daylight Saving Time (CDT, UTC−5) from roughly March to November, so you'd switch the schedule to `0 10 * * *` during the summer months.
 
 ### 7.2 What the workflow does
 
@@ -366,7 +368,7 @@ These boundaries keep v1 small, cheap, and reliable — a single scheduled scrip
 A single day's run looks like this:
 
 ```
-13:00 UTC ──► GitHub Actions spins up a runner
+11:00 UTC ──► GitHub Actions spins up a runner
                 ├─ checkout repo, setup Node 20, npm ci
                 ├─ restore data/seen.json from cache
                 ├─ npm run digest
