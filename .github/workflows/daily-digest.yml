@@ -1,0 +1,75 @@
+name: Daily Tech Digest
+
+# docs/ARCHITECTURE.md section 7 — GitHub Actions provides the "cron".
+on:
+  schedule:
+    # 11:00 UTC == 05:00 CST (Central Standard Time, UTC-6).
+    # GitHub runs schedules in UTC; during Central Daylight Time this is 06:00 local.
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run the pipeline but print the digest instead of posting it'
+        type: boolean
+        default: false
+      log_level:
+        description: 'Log verbosity'
+        type: choice
+        options: [info, debug, warn, error]
+        default: info
+
+# Never let two digests overlap (a manual run plus the scheduled one).
+concurrency:
+  group: daily-digest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
+      # Optional; raises the GitHub search API rate limit (not the trending scrape).
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LOG_LEVEL: ${{ inputs.log_level || 'info' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The runner is ephemeral, so the seen cache is persisted between runs.
+      # Each run saves a fresh key; `restore-keys` picks up the newest previous
+      # one, which makes the seen list effectively "a few days" long.
+      - name: Restore seen cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/seen.json
+          key: seen-${{ github.run_id }}
+          restore-keys: |
+            seen-
+
+      - name: Run digest
+        run: npm run digest ${{ inputs.dry_run && '-- --dry-run' || '' }}
+
+      - name: Save seen cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: data/seen.json
+          key: seen-${{ github.run_id }}
