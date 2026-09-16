@@ -132,10 +132,18 @@ Why normalize everything to one shape? Because the next stages (dedupe, ranking,
 
 The same story often appears across multiple feeds, and a story that was already sent yesterday shouldn't be re-sent today. To handle this, the pipeline keeps a **seen IDs cache** — a small file (`data/seen.json`) listing item IDs/URLs that were already delivered.
 
-- On each run, fetched items whose IDs are in the cache are removed.
-- After a run, newly delivered IDs are added to the cache.
+- On each run, fetched items whose IDs are in the cache are removed (URLs are
+  canonicalized first — tracking params, `www.`, fragments and trailing slashes are
+  stripped — so the same story from three feeds collapses to one).
+- After a run, newly delivered IDs are added to the cache. IDs that were merely
+  *shown to the LLM* are added too, with a shorter window, so a rejected item is not
+  paid for again tomorrow but can still resurface later.
 
-The cache is **short-lived** (a rolling window of a few days) rather than permanent, so an item that reappears later can still surface again after a while. In GitHub Actions, this file is persisted between runs using the **`actions/cache`** feature (see [State and caching](#73-state-and-caching)).
+The cache therefore has two tiers: **delivered** items (default 5 days) and
+**considered** items (default 2 days). Both are rolling windows rather than
+permanent, so an item that reappears later can still surface again after a while.
+In GitHub Actions, this file is persisted between runs using the **`actions/cache`**
+feature (see [State and caching](#73-state-and-caching)).
 
 ### Step 4 — Pre-rank and cap
 
@@ -174,7 +182,7 @@ If the entire digest is empty after filtering, the default behavior is to **skip
 
 ### Step 8 — Post to Discord
 
-The formatted message is sent by making an HTTP `POST` request to `DISCORD_WEBHOOK_URL`. Discord has a **2000-character limit per message**, so if the digest is longer, the formatter splits it into multiple messages and posts them sequentially (e.g. one message per section group, keeping the header on the first).
+The formatted message is sent by making an HTTP `POST` request to `DISCORD_WEBHOOK_URL`. Discord has a **2000-character limit per message**, so if the digest is longer, the formatter splits it into multiple messages and posts them sequentially (one message per chunk of items, keeping the date header on the first message and repeating the section title on continuations). Posts are spaced ~1 second apart to stay friendly to the webhook rate limit, `429`/`5xx` responses are retried with backoff, and every payload disables mentions (`allowed_mentions.parse: []`) so no one can be pinged by accident. The webhook URL is treated as a secret everywhere: log lines only ever show the webhook id, never the token.
 
 ---
 
@@ -222,8 +230,19 @@ Where `Item` is:
 
 ### Enforcement
 
-- **Structured output:** The response is parsed as JSON against the schema; anything that doesn't conform is rejected/retried.
-- **URL allowlist:** Any returned `url` not in the original candidate set is dropped (see [Step 6](#step-6--url-allowlist-validation-anti-hallucination)).
+- **Structured output:** The response is parsed as JSON against the schema
+  (`zod`). The request asks for the provider's structured-output mode
+  (`response_format: {"type":"json_object"}`); if a provider rejects that — or the
+  reply is not parseable — the pipeline retries **once** without structured-output
+  mode, adding a short "reply with JSON only" repair instruction. Raw newlines and
+  tabs inside JSON strings are repaired automatically. If the second attempt also
+  fails, the run fails loudly (visible in Actions) rather than silently posting
+  nothing.
+- **URL allowlist:** Any returned `url` not in the original candidate set is dropped
+  (see [Step 6](#step-6--url-allowlist-validation-anti-hallucination)), and each
+  surviving URL is emitted in its canonical form — the exact link that was fetched.
+- **Category hygiene:** Missing sections are filled with empty arrays, items are
+  trimmed/collapsed, and a story that appears in two categories is kept only once.
 - **Token capping:** Input is limited to ~40–60 candidates (see [Step 4](#step-4--pre-rank-and-cap)).
 
 ---
@@ -232,31 +251,48 @@ Where `Item` is:
 
 ```
 cache-me-up/
-  package.json            # deps + scripts (e.g. "digest")
+  package.json            # deps + scripts ("digest", "digest:dry", "test", "typecheck", "build")
   tsconfig.json           # TypeScript config (Node 20 target)
   config/sources.json     # declarative list of all sources (no code needed to change feeds)
   src/
     index.ts              # CLI entry: fetch → dedupe → rank → LLM → format → post
-    fetchers/*.ts         # per-source adapters (one file per source type)
+    fetchers/
+      index.ts            # registry + concurrent, failure-isolated runner
+      context.ts          # FetchContext/Fetcher contract shared by adapters
+      http.ts             # fetch wrapper: timeout, retries, User-Agent
+      rss.ts              # RSS 2.0 / Atom / RSS 1.0 parser (lab blogs, Lobsters, Reddit)
+      hackernews.ts       # HN via the Algolia search API
+      arxiv.ts            # arXiv Atom query builder
+      huggingface.ts      # HF Hub models (newest + trending merged)
+      github.ts           # trending scrape + repository search API
     types.ts              # shared TypeScript types (CandidateItem, Digest, Item, ...)
-    dedupe.ts             # seen-ID store (works from a local file + in Actions cache)
-    llm.ts                # structured JSON via chat completions
-    format.ts             # turns DigestJSON into Discord markdown payload
+    config.ts             # env + sources.json loading and validation (zod)
+    dedupe.ts             # seen-ID store (local file + Actions cache)
+    rank.ts               # pre-ranking (recency/engagement/keywords) + capping
+    llm.ts                # prompt, structured JSON via chat completions, URL allowlist
+    format.ts             # turns DigestJSON into Discord markdown, incl. 2000-char splitting
     discord.ts            # HTTP POST to the webhook URL
+    util.ts               # URL canonicalization, HTML stripping, truncation helpers
+    log.ts                # tiny level-aware logger
+  tests/                  # unit tests (node:test, no network required)
   .github/workflows/daily-digest.yml   # GitHub Actions cron + manual trigger
+  .github/workflows/ci.yml             # typecheck + tests on push/PR
   .env.example            # template for required environment variables
   README.md               # setup instructions
 ```
 
 | Component | Role |
 | --- | --- |
-| `index.ts` | The orchestrator — wires the stages together in order |
-| `fetchers/*.ts` | Isolate the messy, source-specific logic (parsing RSS, calling APIs) |
-| `types.ts` | The single source of truth for data shapes across the project |
+| `index.ts` | The orchestrator — wires the stages together in order, owns the CLI flags and exit codes |
+| `fetchers/*.ts` | Isolate the messy, source-specific logic (parsing RSS, calling APIs); `context.ts` keeps the adapters decoupled from the runner |
+| `types.ts` | The single source of truth for data shapes across the project (plus the four category definitions) |
+| `config.ts` | Loads `.env` and validates `config/sources.json`; a typo in the config fails fast with a readable error |
 | `dedupe.ts` | Reads/writes the seen-ID cache and filters candidates |
-| `llm.ts` | Builds the prompt, calls the chat-completions API, parses/validates JSON |
+| `rank.ts` | Scores candidates (recency + engagement + keyword boosts) and caps/diversifies the list |
+| `llm.ts` | Builds the prompt, calls the chat-completions API, parses/validates JSON, enforces the URL allowlist |
 | `format.ts` | Pure function: DigestJSON → markdown string(s), incl. 2000-char splitting |
-| `discord.ts` | Thin wrapper around the webhook HTTP POST |
+| `discord.ts` | Thin wrapper around the webhook HTTP POST (no mentions, sequential posts) |
+| `tests/` | Offline unit tests for dedupe, ranking, formatting, the LLM contract and the fetcher parsers |
 
 ---
 
@@ -281,10 +317,17 @@ Each run:
 
 1. Spins up a fresh **Ubuntu runner** (temporary virtual machine).
 2. Checks out the repository.
-3. Sets up **Node 20**.
-4. Runs `npm ci` to install exact dependencies.
-5. Runs `npm run digest` (which executes `src/index.ts`).
-6. Tears the machine down.
+3. Sets up **Node 20** (`actions/setup-node` with npm caching).
+4. Restores `data/seen.json` from cache (if a previous run saved one).
+5. Runs `npm ci` to install exact dependencies.
+6. Runs `npm run digest` (which executes `src/index.ts`).
+7. Saves the updated `data/seen.json` back to cache (only when the step succeeded).
+8. Tears the machine down.
+
+The workflow also accepts a manual **dry run** input plus a `log_level` choice, and a
+`concurrency` group ensures a manual run can never overlap the scheduled one.
+A separate `ci.yml` workflow runs `npm run typecheck` and `npm test` on pushes and
+pull requests, so a broken parser or prompt change is caught before the cron fires.
 
 ### 7.3 State and caching
 
@@ -295,7 +338,28 @@ The solution is **`actions/cache`**, a GitHub Actions feature that can save a se
 - On run start: **restore** `data/seen.json` from cache (if present).
 - On run end: **save** the updated `data/seen.json` back to cache.
 
-The cache key is tied to a **date window** (e.g. keyed by day), which naturally makes the seen-list "short-lived" — old cache entries fall out of the active window after a few days, so very old items are allowed to resurface later. This matches the design goal of suppressing repeats for "a few days," not forever.
+The cache key includes the workflow **run id**, so every run writes a fresh entry,
+while `restore-keys: seen-` picks up the newest previous entry. GitHub evicts cache
+entries that have not been read for ~7 days, which naturally makes the seen list
+"short-lived" — old entries fall out of the active window, so very old items are
+allowed to resurface later. This matches the design goal of suppressing repeats for
+"a few days," not forever.
+
+### 7.4 Running the pipeline outside Actions
+
+The same entry point runs locally, which is how the pipeline is developed and
+debugged:
+
+| Command | Behaviour |
+| --- | --- |
+| `npm run digest` | Full run: fetch → dedupe → rank → LLM → post → save cache |
+| `npm run digest:dry` | Everything except the post; nothing is written to the seen cache |
+| `npm run digest:dry -- --print-candidates` | Also logs every ranked candidate with its score |
+| `npm test` / `npm run typecheck` | Offline unit tests (no network) and type checking |
+
+The CLI accepts `--dry-run` and `--print-candidates`; unknown flags are ignored.
+Without `OPENAI_API_KEY` a dry run deliberately stops after pre-ranking, which is
+enough to exercise every fetcher, the dedupe cache and the ranking stage.
 
 ---
 
@@ -305,9 +369,23 @@ The cache key is tied to a **date window** (e.g. keyed by day), which naturally 
 
 The full list of feeds/APIs lives in a declarative JSON config. Each entry describes:
 
-- The **source type** (which fetcher adapter to use).
-- The **URL/endpoint** to fetch.
-- An **interest/category hint** used for ranking (optional).
+- The **source type** (`kind` — which fetcher adapter to use).
+- The **URL/endpoint** to fetch (`url`, required for `rss`).
+- Optional **tags** (HN story sets, arXiv categories).
+- An **interest/category hint** used for ranking (`interest`).
+- Optional knobs: `enabled`, `limit`, `minPoints`, `minStars`, `query`.
+
+The config is validated at startup with `zod`; an unknown field, a bad `kind`, or a
+duplicate `id` aborts the run with a readable message instead of silently ignoring
+the mistake. Top-level settings (`lookbackHours`, `maxCandidates`,
+`maxItemsPerSource`) override the matching environment variables when present.
+
+Two deliberate default choices:
+
+- The **Reddit** sources ship with `"enabled": false`. Reddit returns HTTP 429 for
+  most shared/datacenter IPs (GitHub runners included), so they are opt-in.
+- **Anthropic** publishes no public RSS feed, so the "major lab blogs" are OpenAI,
+  Google DeepMind, Google AI, Meta AI and the Hugging Face blog.
 
 This is how the plan maps interests to sources:
 
@@ -326,8 +404,22 @@ Secrets and tunable settings are provided via environment variables, loaded from
 | --- | --- | --- |
 | `OPENAI_API_KEY` | Yes | Authenticates the LLM chat-completions call |
 | `DISCORD_WEBHOOK_URL` | Yes | The webhook URL the message is POSTed to |
-| `OPENAI_MODEL` | No | Override the default model name |
+| `OPENAI_MODEL` | No | Override the default model name (`gpt-4o-mini`) |
 | `OPENAI_BASE_URL` | No | Point at an OpenAI-compatible provider |
+| `LOOKBACK_HOURS` | No | Freshness window (default 36); `sources.json` wins if it sets one |
+| `MAX_CANDIDATES` | No | LLM input cap (default 50) |
+| `MAX_ITEMS_PER_SOURCE` | No | Per-source diversification cap (default 12) |
+| `SEEN_STORE_PATH` | No | Where the seen cache lives (default `data/seen.json`) |
+| `SEEN_WINDOW_DAYS` | No | How long delivered items stay suppressed (default 5) |
+| `CONSIDERED_WINDOW_DAYS` | No | How long LLM-reviewed-but-not-delivered items stay suppressed (default 2) |
+| `DIGEST_POST_EMPTY` | No | `true` posts a "nothing new" note instead of staying silent |
+| `FETCH_TIMEOUT_MS` | No | Per-request HTTP timeout for fetchers (default 20000) |
+| `LLM_TIMEOUT_MS` | No | Timeout for the chat-completions call (default 120000) |
+| `LOG_LEVEL` | No | `debug` \| `info` \| `warn` \| `error` (default `info`) |
+| `GITHUB_TOKEN` | No | Raises the GitHub search API rate limit |
+
+Missing required variables produce one aggregated, readable error mentioning which
+secret is absent and where to put it.
 
 ---
 
@@ -345,9 +437,11 @@ Secrets and tunable settings are provided via environment variables, loaded from
 | Failure | Consequence | Mitigation |
 | --- | --- | --- |
 | A single source is down/rate-limited | That source contributes no items | Fetchers are isolated; one failure is caught and logged without killing the whole run |
-| LLM returns malformed JSON | Pipeline can't build the digest | Response is validated against the schema; parse/validation failures are surfaced and the run fails loudly (so it's visible in Actions) rather than silently posting nothing |
+| A source's markup or API changes (e.g. GitHub trending) | That adapter returns no items | Parsers are defensive: a zero-result parse logs an explicit warning instead of throwing, and `github-search` covers the same interest |
+| LLM returns malformed JSON | Pipeline can't build the digest | Response is validated against the schema, retried once (also covering providers that reject `response_format`), and then surfaced so the run fails loudly (visible in Actions) rather than silently posting nothing |
 | LLM returns an unknown URL | A broken/fabricated link | URL allowlist validation drops it |
 | Message > 2000 chars | Discord rejects the POST | Formatter splits into sequential messages |
+| Webhook returns 429/5xx | Message not sent | Retried with backoff (`Retry-After` honoured), and webhook URLs are validated before the LLM call is paid for |
 | Digest is empty after filtering | Nothing to say | Default: skip posting (noise reduction); optional "nothing new" note |
 | Cache misses / cold start | No dedupe history, so first run may duplicate | Acceptable; subsequent runs rebuild the cache |
 
