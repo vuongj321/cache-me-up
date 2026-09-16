@@ -20,12 +20,29 @@ Actions schedule, with no server to run.
 | **AI / programming concepts** | Papers, explainers, techniques |
 | **Cool builds** | Impressive projects and tools people have shipped |
 
+Each section is posted as a **coloured embed card**: the item title is the clickable
+line, the summary is plain body text, and the source is demoted to small grey
+subtext — so a section header never has to be repeated when a digest is split:
+
+```
+## Daily Tech Digest — 2026-09-16
+-# 13 items across 4 sections
+
+▐ 🧠 New AI models                                    ◄ blurple accent bar
+  [JustVugg / colibri](https://github.com/JustVugg/colibri)
+  A pure-C inference engine with zero dependencies that runs frontier
+  mixture-of-experts models on hardware you already own…
+  -# GitHub Trending
+▐ 💡 Project inspiration                              ◄ yellow accent bar
+  …
+```
+
 ## How it works
 
 ```
 GitHub Actions cron ─► fetch feeds/APIs ─► dedupe vs. seen cache ─► pre-rank & cap
       ─► LLM filter + categorize + summarize ─► URL allowlist check
-      ─► format markdown ─► Discord webhook POST
+      ─► format section cards ─► Discord webhook POST
 ```
 
 | Stage | Code | Notes |
@@ -35,7 +52,7 @@ GitHub Actions cron ─► fetch feeds/APIs ─► dedupe vs. seen cache ─► 
 | Pre-rank | `src/rank.ts` | Recency + engagement + keyword boosts, capped at `maxCandidates` |
 | LLM | `src/llm.ts` | Strict JSON via any OpenAI-compatible chat-completions endpoint |
 | Validate | `src/llm.ts` | Any URL the model invented/wrote is dropped |
-| Format | `src/format.ts` | Markdown, split to respect Discord's 2000-char limit |
+| Format | `src/format.ts` | One coloured embed card per section, packed under Discord's 10-embed / 6000-char limit |
 | Post | `src/discord.ts` | Sequential webhook POSTs with retry/backoff |
 
 ## Quick start (local)
@@ -199,8 +216,8 @@ cache-me-up/
     dedupe.ts                  # rolling seen-ID cache
     rank.ts                    # pre-ranking + capping
     llm.ts                     # prompt, chat call, JSON validation, URL allowlist
-    format.ts                  # Digest -> Discord markdown (+ 2000-char splitting)
-    discord.ts                 # webhook POST
+    format.ts                  # Digest -> Discord embed cards (+ embed-limit packing)
+    discord.ts                 # webhook POST (content + embeds)
     util.ts / log.ts           # small shared helpers
   tests/                       # unit tests (no network access required)
   .github/workflows/ci.yml             # typecheck + tests on push/PR
@@ -218,7 +235,7 @@ cache-me-up/
 | `LLM output was truncated ... hit max_tokens=` | The model ran out of output budget mid-reply, so the JSON has no closing braces and cannot be parsed. Not retried (the same prompt truncates in the same place). Raise `LLM_MAX_OUTPUT_TOKENS` or lower `MAX_CANDIDATES` |
 | Nothing was posted | The digest was empty after filtering (default = stay silent). Set `DIGEST_POST_EMPTY=true` for a "nothing new" note |
 | Links look short/rewritten | Not possible: any URL that was not in the fetched candidate set is dropped by the allowlist |
-| Digest arrives in several messages | Working as intended — Discord caps messages at 2000 characters |
+| Digest arrives in several messages | Working as intended — Discord allows 10 embeds / 6000 characters of embeds per message. Each section is one card, and continuation messages never repeat a header |
 
 ## Costs and limits
 

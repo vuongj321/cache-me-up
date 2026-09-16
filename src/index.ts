@@ -15,7 +15,7 @@ import { assertSecrets, loadEnv, loadSources } from './config';
 import { filterUnseen, loadSeenStore, markSeen, saveSeenStore, seenKey, type SeenStore } from './dedupe';
 import { isValidWebhookUrl, maskWebhookUrl, postToDiscord } from './discord';
 import { createFetchContext, fetchAllSources } from './fetchers';
-import { formatDigestMessages, formatNothingNew } from './format';
+import { formatDigestMessages, formatNothingNew, messagesToPlainText } from './format';
 import { countDigestItems, generateDigest, type LlmConfig } from './llm';
 import { createLogger, type Logger } from './log';
 import { rankAndCap } from './rank';
@@ -154,9 +154,9 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
       const note = formatNothingNew(startedAt);
       if (options.dryRun) {
         log.info('dry run — would post the "nothing new" note:');
-        console.log(note);
+        console.log(messagesToPlainText(note));
       } else {
-        await postToDiscord(env.discordWebhookUrl as string, [note], { log, timeoutMs: env.fetchTimeoutMs });
+        await postToDiscord(env.discordWebhookUrl as string, note, { log, timeoutMs: env.fetchTimeoutMs });
       }
     } else {
       log.info('digest is empty after filtering — skipping the post (set DIGEST_POST_EMPTY=true to post a note)');
@@ -166,14 +166,15 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
   }
 
   const messages = formatDigestMessages(digest, { date: startedAt });
+  const cardCount = messages.reduce((total, message) => total + (message.embeds?.length ?? 0), 0);
   log.info(
-    `digest built: ${itemCount} item(s) in ${messages.length} message(s); ` +
+    `digest built: ${itemCount} item(s) in ${messages.length} message(s) / ${cardCount} section card(s); ` +
       `URL allowlist dropped ${dropped.length} item(s)`,
   );
 
   if (options.dryRun) {
     log.info('dry run — Discord message(s) follow');
-    console.log(messages.join('\n\n----- next message -----\n\n'));
+    console.log(messagesToPlainText(messages));
     log.info('dry run complete — nothing posted, seen cache unchanged');
     return 0;
   }

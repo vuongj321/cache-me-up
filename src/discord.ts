@@ -13,8 +13,33 @@ import { sleep } from './util';
 export const WEBHOOK_URL_PATTERN =
   /^https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[\w-]+$/;
 
+/** One line of an embed card: the item title (name) and its summary (value). */
+export interface DiscordEmbedField {
+  name: string;
+  value: string;
+}
+
+/** A rich card. Discord renders up to 10 per message and 6000 characters in total. */
+export interface DiscordEmbed {
+  title?: string;
+  description?: string;
+  /** Accent colour as `0xRRGGBB`; this is the coloured bar that groups a section. */
+  color?: number;
+  fields?: DiscordEmbedField[];
+}
+
+/**
+ * One webhook post. `content` is optional because continuation messages carry
+ * embeds only — that is what keeps a split digest from repeating its header.
+ */
+export interface DiscordMessage {
+  content?: string;
+  embeds?: DiscordEmbed[];
+}
+
 export interface DiscordPayload {
-  content: string;
+  content?: string;
+  embeds?: DiscordEmbed[];
   /** Never ping anyone, whatever the digest text contains. */
   allowed_mentions: { parse: string[] };
 }
@@ -29,8 +54,13 @@ export function maskWebhookUrl(url: string): string {
   return match?.[1] ? `https://discord.com/api/webhooks/${match[1]}/***` : 'https://discord.com/api/webhooks/***';
 }
 
-export function toDiscordPayload(content: string): DiscordPayload {
-  return { content, allowed_mentions: { parse: [] } };
+/** Strip empty fields so Discord never sees `content: undefined` or `embeds: []`. */
+export function toDiscordPayload(message: DiscordMessage): DiscordPayload {
+  return {
+    ...(message.content ? { content: message.content } : {}),
+    ...(message.embeds && message.embeds.length > 0 ? { embeds: message.embeds } : {}),
+    allowed_mentions: { parse: [] },
+  };
 }
 
 export interface PostOptions {
@@ -49,7 +79,7 @@ export interface PostResult {
 /** POST each message in order. Throws on the first message Discord rejects. */
 export async function postToDiscord(
   webhookUrl: string,
-  contents: string[],
+  messages: DiscordMessage[],
   options: PostOptions = {},
 ): Promise<PostResult> {
   if (!isValidWebhookUrl(webhookUrl)) {
@@ -62,8 +92,8 @@ export async function postToDiscord(
   const delayMs = options.delayMs ?? 1000;
   const statuses: number[] = [];
 
-  for (const [index, content] of contents.entries()) {
-    const payload = toDiscordPayload(content);
+  for (const [index, message] of messages.entries()) {
+    const payload = toDiscordPayload(message);
 
     try {
       const response = await request(webhookUrl, {
@@ -75,15 +105,21 @@ export async function postToDiscord(
         body: JSON.stringify(payload),
       });
       statuses.push(response.status);
-      options.log?.debug(`posted Discord message ${index + 1}/${contents.length} (${response.status})`);
+      const cards = payload.embeds?.length ?? 0;
+      options.log?.debug(
+        `posted Discord message ${index + 1}/${messages.length} ` +
+          `(${response.status}, ${cards} embed(s))`,
+      );
     } catch (error) {
       if (error instanceof HttpError) {
-        throw new Error(`Discord rejected message ${index + 1}/${contents.length}: ${error.status} ${error.body ?? ''}`.trim());
+        throw new Error(
+          `Discord rejected message ${index + 1}/${messages.length}: ${error.status} ${error.body ?? ''}`.trim(),
+        );
       }
       throw error;
     }
 
-    if (index < contents.length - 1) await sleep(delayMs);
+    if (index < messages.length - 1) await sleep(delayMs);
   }
 
   options.log?.info(`posted ${statuses.length} message(s) to Discord`);

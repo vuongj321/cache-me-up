@@ -77,7 +77,7 @@ flowchart LR
   rank --> llm[LLM filter + categorize]
   llm --> validate[URL allowlist validation]
   validate --> digest[Digest JSON]
-  digest --> format[Format message]
+  digest --> format[Format section cards]
   format --> discord[Discord webhook POST]
 ```
 
@@ -90,7 +90,7 @@ Each stage has a single responsibility, which makes the system easy to test and 
 | **Pre-rank** | Sort/score the remaining items and cap the list to a manageable size for the LLM |
 | **LLM** | Decide which items are worth including, assign each to a category, and write a 1–2 sentence summary |
 | **Validate** | Ensure the LLM didn't invent URLs that weren't in the candidate set (anti-hallucination) |
-| **Format** | Turn the structured digest into Discord-friendly markdown |
+| **Format** | Turn the structured digest into one coloured embed card per section, packed under Discord's message limits |
 | **Post** | Send the message(s) to Discord via webhook |
 
 ---
@@ -168,21 +168,43 @@ To prevent this, the pipeline keeps an **allowlist** of every URL that was actua
 
 ### Step 7 — Format the digest
 
-The validated digest JSON is converted into a Discord message:
+The validated digest JSON is converted into a Discord message built from **embed
+cards**, one per non-empty category:
 
-- A **date header** (e.g. "Daily Tech Digest — 2026-09-15").
-- **Bold section titles** for each non-empty category.
-- **Bullet lines** per item, formatted like:
+- A **date header** on the first message (`## Daily Tech Digest — 2026-09-16`, plus
+  a subtext line with the item/section counts).
+- One **embed per section**, carrying that section's accent colour and an emoji
+  title (e.g. `🧠 New AI models`).
+- One **field per item**, where the item title is the clickable line, the summary
+  stays plain body text, and the source is demoted to subtext (`-# GitHub Trending`).
 
-  ```
-  **Title** — one-to-two sentence summary ([source](url))
-  ```
+The result is three visual weights (title, body, attribution) instead of one crowded
+bullet line, with the accent colour grouping each section at a glance:
 
-If the entire digest is empty after filtering, the default behavior is to **skip posting** (to reduce noise). Optionally it can post a short "nothing new today" note.
+```
+## Daily Tech Digest — 2026-09-16
+-# 13 items across 4 sections
+
+▐ 🧠 New AI models                                  ◄ accent bar
+  [JustVugg / colibri](https://github.com/JustVugg/colibri)
+  A pure-C inference engine with zero dependencies …
+  -# GitHub Trending
+▐ 💡 Project inspiration                             ◄ accent bar
+  …
+```
+
+Discord's per-message limits are respected: **≤ 10 embeds** and **≤ 6000 characters**
+of embed text (the formatter budgets 5600, against 256-char titles, 25 fields per
+card, 256-char field names and 1024-char field values). A section that outgrows one
+card continues in a second card with the **same accent colour and no title**, and a
+new message is only started once a limit is reached — so no header is ever printed
+twice.
+
+If the entire digest is empty after filtering, the default behavior is to **skip posting** (to reduce noise). Optionally it can post a short "nothing new today" note, as a single card.
 
 ### Step 8 — Post to Discord
 
-The formatted message is sent by making an HTTP `POST` request to `DISCORD_WEBHOOK_URL`. Discord has a **2000-character limit per message**, so if the digest is longer, the formatter splits it into multiple messages and posts them sequentially (one message per chunk of items, keeping the date header on the first message and repeating the section title on continuations). Posts are spaced ~1 second apart to stay friendly to the webhook rate limit, `429`/`5xx` responses are retried with backoff, and every payload disables mentions (`allowed_mentions.parse: []`) so no one can be pinged by accident. The webhook URL is treated as a secret everywhere: log lines only ever show the webhook id, never the token.
+The formatted messages are sent as one HTTP `POST` per message to `DISCORD_WEBHOOK_URL`. Each post carries its embeds — and the date header only on the first message — so a digest that has to be split continues quietly instead of reprinting its headings. Posts are spaced ~1 second apart to stay friendly to the webhook rate limit, `429`/`5xx` responses are retried with backoff, and every payload disables mentions (`allowed_mentions.parse: []`) so no one can be pinged by accident. The webhook URL is treated as a secret everywhere: log lines only ever show the webhook id, never the token.
 
 ---
 
@@ -279,8 +301,8 @@ cache-me-up/
     dedupe.ts             # seen-ID store (local file + Actions cache)
     rank.ts               # pre-ranking (recency/engagement/keywords) + capping
     llm.ts                # prompt, structured JSON via chat completions, URL allowlist
-    format.ts             # turns DigestJSON into Discord markdown, incl. 2000-char splitting
-    discord.ts            # HTTP POST to the webhook URL
+    format.ts             # turns DigestJSON into Discord embed cards, incl. limit packing
+    discord.ts            # HTTP POST to the webhook URL (message content + embeds)
     util.ts               # URL canonicalization, HTML stripping, truncation helpers
     log.ts                # tiny level-aware logger
   tests/                  # unit tests (node:test, no network required)
@@ -299,7 +321,7 @@ cache-me-up/
 | `dedupe.ts` | Reads/writes the seen-ID cache and filters candidates |
 | `rank.ts` | Scores candidates (recency + engagement + keyword boosts) and caps/diversifies the list |
 | `llm.ts` | Builds the prompt, calls the chat-completions API, parses/validates JSON, enforces the URL allowlist |
-| `format.ts` | Pure function: DigestJSON → markdown string(s), incl. 2000-char splitting |
+| `format.ts` | Pure function: DigestJSON → one embed card per section, packed under Discord's embed limits |
 | `discord.ts` | Thin wrapper around the webhook HTTP POST (no mentions, sequential posts) |
 | `tests/` | Offline unit tests for dedupe, ranking, formatting, the LLM contract and the fetcher parsers |
 
@@ -451,7 +473,7 @@ secret is absent and where to put it.
 | LLM returns malformed JSON | Pipeline can't build the digest | Response is validated against the schema, retried once (also covering providers that reject `response_format`), and then surfaced so the run fails loudly (visible in Actions) rather than silently posting nothing |
 | LLM reply cut off by the output budget (`finish_reason: length`) | Half-written JSON, so nothing can be parsed | Detected via `finish_reason` and reported as a truncation (with the token cap and the reply's tail) instead of a generic parse error; not retried, because the same prompt truncates in the same place. Fix with `LLM_MAX_OUTPUT_TOKENS` / `MAX_CANDIDATES` |
 | LLM returns an unknown URL | A broken/fabricated link | URL allowlist validation drops it |
-| Message > 2000 chars | Discord rejects the POST | Formatter splits into sequential messages |
+| Digest larger than one message (≤10 embeds / 6000 embed chars) | Discord rejects the POST | Formatter packs cards into messages under the limits and continues a section without repeating its header |
 | Webhook returns 429/5xx | Message not sent | Retried with backoff (`Retry-After` honoured), and webhook URLs are validated before the LLM call is paid for |
 | Digest is empty after filtering | Nothing to say | Default: skip posting (noise reduction); optional "nothing new" note |
 | Cache misses / cold start | No dedupe history, so first run may duplicate | Acceptable; subsequent runs rebuild the cache |
@@ -484,7 +506,7 @@ A single day's run looks like this:
                 │     ├─ score by recency + keyword boosts, cap to ~40–60
                 │     ├─ LLM returns categorized + summarized JSON
                 │     ├─ reject any URL not in the allowlist
-                │     ├─ format to markdown (split if >2000 chars)
+                │     ├─ format one embed card per section (packed under Discord's limits)
                 │     └─ POST to Discord webhook
                 ├─ save updated data/seen.json to cache
                 └─ runner is torn down

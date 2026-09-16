@@ -14,6 +14,10 @@ export interface CategoryDefinition {
   key: CategoryKey;
   /** Human label used as the Discord section title. */
   label: string;
+  /** Emoji prefixed to the label so sections are scannable at a glance. */
+  emoji: string;
+  /** Discord embed accent colour (`0xRRGGBB`) — the coloured bar on the section card. */
+  color: number;
   /** Instruction handed to the LLM so it can route items correctly. */
   description: string;
 }
@@ -22,6 +26,8 @@ export const CATEGORY_DEFINITIONS: readonly CategoryDefinition[] = [
   {
     key: 'new_models',
     label: 'New AI models',
+    emoji: '🧠',
+    color: 0x5865f2,
     description:
       'Newly released or newly notable AI models and checkpoints: open-weight releases, multimodal or coding models, ' +
       'significant version updates, and notable inference/serving stacks for them.',
@@ -29,6 +35,8 @@ export const CATEGORY_DEFINITIONS: readonly CategoryDefinition[] = [
   {
     key: 'project_inspiration',
     label: 'Project inspiration',
+    emoji: '💡',
+    color: 0xfaa61a,
     description:
       'Ideas worth building. Tools, techniques, or observations that suggest a side project, a new approach to an ' +
       'existing problem, or a clever workaround an engineer could apply this week.',
@@ -36,6 +44,8 @@ export const CATEGORY_DEFINITIONS: readonly CategoryDefinition[] = [
   {
     key: 'concepts',
     label: 'AI / programming concepts',
+    emoji: '📚',
+    color: 0x57f287,
     description:
       'Educational material that teaches something: papers, explainers, deep dives, benchmarks, and engineering ' +
       'write-ups about a technique, algorithm, architecture, or tooling concept.',
@@ -43,6 +53,8 @@ export const CATEGORY_DEFINITIONS: readonly CategoryDefinition[] = [
   {
     key: 'cool_builds',
     label: 'Cool builds',
+    emoji: '🛠️',
+    color: 0xeb459e,
     description:
       'Impressive things people actually shipped: open-source projects, demos, developer tools, and polished hobby builds.',
   },
