@@ -1,0 +1,28 @@
+{
+  "name": "cache-me-up",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Daily Tech Digest — fetch curated tech/AI feeds, filter + categorize with an LLM, post one Discord message via webhook.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "digest": "tsx src/index.ts",
+    "digest:dry": "tsx src/index.ts --dry-run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --import tsx --test tests/dedupe.test.ts tests/rank.test.ts tests/format.test.ts tests/llm.test.ts tests/fetchers.test.ts",
+    "test:all": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^4.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

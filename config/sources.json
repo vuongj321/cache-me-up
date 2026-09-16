@@ -1,0 +1,128 @@
+{
+  "lookbackHours": 36,
+  "maxCandidates": 50,
+  "maxItemsPerSource": 12,
+  "sources": [
+    {
+      "id": "hn-frontpage",
+      "name": "Hacker News",
+      "kind": "hackernews",
+      "tags": ["story"],
+      "interest": "concepts",
+      "limit": 30,
+      "minPoints": 40
+    },
+    {
+      "id": "hn-show",
+      "name": "Hacker News",
+      "kind": "hackernews",
+      "tags": ["show_hn"],
+      "interest": "cool_builds",
+      "limit": 25,
+      "minPoints": 10
+    },
+    {
+      "id": "hf-trending-models",
+      "name": "Hugging Face Hub",
+      "kind": "huggingface",
+      "interest": "new_models",
+      "limit": 15
+    },
+    {
+      "id": "hf-blog",
+      "name": "Hugging Face Blog",
+      "kind": "rss",
+      "url": "https://huggingface.co/blog/feed.xml",
+      "interest": "new_models"
+    },
+    {
+      "id": "openai-news",
+      "name": "OpenAI",
+      "kind": "rss",
+      "url": "https://openai.com/news/rss.xml",
+      "interest": "new_models"
+    },
+    {
+      "id": "deepmind-blog",
+      "name": "Google DeepMind",
+      "kind": "rss",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "interest": "new_models"
+    },
+    {
+      "id": "google-ai-blog",
+      "name": "Google AI",
+      "kind": "rss",
+      "url": "https://blog.google/technology/ai/rss/",
+      "interest": "new_models"
+    },
+    {
+      "id": "meta-ai-news",
+      "name": "Meta AI",
+      "kind": "rss",
+      "url": "https://about.fb.com/news/tag/ai/feed/",
+      "interest": "new_models"
+    },
+    {
+      "id": "arxiv-cs",
+      "name": "arXiv",
+      "kind": "arxiv",
+      "tags": ["cs.AI", "cs.LG", "cs.SE"],
+      "interest": "concepts",
+      "limit": 30
+    },
+    {
+      "id": "lobsters-ai",
+      "name": "Lobsters",
+      "kind": "rss",
+      "url": "https://lobste.rs/t/ai.rss",
+      "interest": "concepts"
+    },
+    {
+      "id": "lobsters-programming",
+      "name": "Lobsters",
+      "kind": "rss",
+      "url": "https://lobste.rs/t/programming.rss",
+      "interest": "concepts"
+    },
+    {
+      "id": "github-trending",
+      "name": "GitHub Trending",
+      "kind": "github-trending",
+      "interest": "cool_builds",
+      "limit": 15
+    },
+    {
+      "id": "github-new-repos",
+      "name": "GitHub",
+      "kind": "github-search",
+      "interest": "cool_builds",
+      "limit": 15,
+      "minStars": 75
+    },
+    {
+      "id": "reddit-localllama",
+      "name": "r/LocalLLaMA",
+      "kind": "rss",
+      "url": "https://www.reddit.com/r/LocalLLaMA/top/.rss?t=day",
+      "interest": "new_models",
+      "enabled": false
+    },
+    {
+      "id": "reddit-machinelearning",
+      "name": "r/MachineLearning",
+      "kind": "rss",
+      "url": "https://www.reddit.com/r/MachineLearning/top/.rss?t=day",
+      "interest": "concepts",
+      "enabled": false
+    },
+    {
+      "id": "reddit-programming",
+      "name": "r/programming",
+      "kind": "rss",
+      "url": "https://www.reddit.com/r/programming/top/.rss?t=day",
+      "interest": "cool_builds",
+      "enabled": false
+    }
+  ]
+}
