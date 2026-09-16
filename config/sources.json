@@ -1,6 +1,6 @@
 {
   "lookbackHours": 36,
-  "maxCandidates": 50,
+  "maxCandidates": 30,
   "maxItemsPerSource": 12,
   "sources": [
     {

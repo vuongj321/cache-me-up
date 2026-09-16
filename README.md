@@ -99,7 +99,7 @@ Top-level settings (env vars act as fallbacks when omitted):
 ```json
 {
   "lookbackHours": 36,      // ignore items older than this
-  "maxCandidates": 50,      // hard cap on what the LLM sees
+  "maxCandidates": 30,      // hard cap on what the LLM sees
   "maxItemsPerSource": 12   // diversification cap so one feed can't dominate
 }
 ```
@@ -124,13 +124,14 @@ Copy `.env.example` to `.env` for local runs, or use GitHub secrets (below).
 | `OPENAI_MODEL` | no | `gpt-4o-mini` | Model name |
 | `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | Any OpenAI-compatible provider |
 | `LOOKBACK_HOURS` | no | `36` | Freshness window |
-| `MAX_CANDIDATES` | no | `50` | LLM input cap |
+| `MAX_CANDIDATES` | no | `30` | LLM input cap |
 | `MAX_ITEMS_PER_SOURCE` | no | `12` | Per-source diversification cap |
 | `SEEN_STORE_PATH` | no | `data/seen.json` | Dedupe cache location |
 | `SEEN_WINDOW_DAYS` | no | `5` | How long a delivered item stays suppressed |
 | `CONSIDERED_WINDOW_DAYS` | no | `2` | How long an LLM-reviewed item stays suppressed |
 | `DIGEST_POST_EMPTY` | no | `false` | Post a "nothing new" note instead of staying silent |
 | `FETCH_TIMEOUT_MS` | no | `20000` | Per-request HTTP timeout |
+| `LLM_MAX_OUTPUT_TOKENS` | no | `6000` | Most tokens the model may write; a reply cut off by this fails the run |
 | `LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `GITHUB_TOKEN` | no | — | Raises the GitHub search API rate limit |
 
@@ -213,14 +214,15 @@ cache-me-up/
 | `Missing required environment variable(s)` | Set the secret locally in `.env` or in Actions secrets |
 | A source logs `failed: ... 429` | Rate limited (Reddit, mainly). It is skipped; disable it in `config/sources.json` if it is persistent |
 | `github-trending` parsed 0 repositories | GitHub changed its markup; the `github-search` source still covers new repos |
-| `LLM response was not valid JSON` / `did not match the digest schema` | The call is retried once without structured-output mode, then the run fails loudly so you see it in Actions |
+| `LLM response was not valid JSON` / `did not match the digest schema` | The call is retried once without structured-output mode, then the run fails loudly so you see it in Actions. The message shows the reply's length plus its first **and last** 200 characters, so an incomplete trailing brace is visible |
+| `LLM output was truncated ... hit max_tokens=` | The model ran out of output budget mid-reply, so the JSON has no closing braces and cannot be parsed. Not retried (the same prompt truncates in the same place). Raise `LLM_MAX_OUTPUT_TOKENS` or lower `MAX_CANDIDATES` |
 | Nothing was posted | The digest was empty after filtering (default = stay silent). Set `DIGEST_POST_EMPTY=true` for a "nothing new" note |
 | Links look short/rewritten | Not possible: any URL that was not in the fetched candidate set is dropped by the allowlist |
 | Digest arrives in several messages | Working as intended — Discord caps messages at 2000 characters |
 
 ## Costs and limits
 
-- One LLM request per day, carrying at most `maxCandidates` (50) short items —
+- One LLM request per day, carrying at most `maxCandidates` (30) short items —
   typically a fraction of a cent with a small model.
 - Everything else is free: GitHub Actions minutes (well within the free tier),
   public feeds/APIs, and a Discord webhook.

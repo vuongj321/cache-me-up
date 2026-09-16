@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  assertNotTruncated,
   buildCandidatePayload,
   buildMessages,
   enforceUrlAllowlist,
   extractJson,
+  generateDigest,
+  isTruncated,
+  LlmResponseError,
+  LlmTruncationError,
   parseRawDigest,
+  type LlmConfig,
 } from '../src/llm';
 import { CATEGORIES, type CandidateItem, type RawDigest } from '../src/types';
 
@@ -90,6 +96,114 @@ test('enforceUrlAllowlist falls back to the fetched source name', () => {
 
   const result = enforceUrlAllowlist(raw, [candidate(1)], NOW);
   assert.equal(result.digest.categories.new_models[0]?.source, 'Feed 1');
+});
+
+const LLM_CONFIG: LlmConfig = {
+  apiKey: 'test-key',
+  model: 'test-model',
+  baseUrl: 'https://llm.example.com/v1',
+  timeoutMs: 5000,
+  maxCandidates: 50,
+  maxOutputTokens: 6000,
+};
+
+/** The reply shape from the truncated run: valid JSON right up to the cut. */
+const TRUNCATED_REPLY =
+  '{"categories":{"new_models":[{"title":"Introducing Gemini 3.8 Live and 3.8 Live Extended Thinking","summary":"Google Deep';
+
+function completionBody(content: string, finishReason = 'stop'): string {
+  return JSON.stringify({
+    choices: [{ index: 0, finish_reason: finishReason, message: { role: 'assistant', content } }],
+    usage: { total_tokens: 100, completion_tokens: 60 },
+  });
+}
+
+/** Run `call` with `globalThis.fetch` replaced by a canned chat-completions responder. */
+async function withStubbedCompletions<T>(
+  respond: () => string,
+  call: () => Promise<T>,
+): Promise<{ calls: number; value?: T; error?: unknown }> {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return new Response(respond(), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+
+  try {
+    // `calls` must be read *after* the awaited call, not before.
+    const value = await call();
+    return { calls, value };
+  } catch (error) {
+    return { calls, error };
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test('isTruncated recognizes the finish reasons that mean "ran out of room"', () => {
+  assert.equal(isTruncated('length'), true);
+  assert.equal(isTruncated('max_tokens'), true, 'several OpenAI-compatible providers report it this way');
+  assert.equal(isTruncated('stop'), false);
+  assert.equal(isTruncated(undefined), false);
+});
+
+test('assertNotTruncated describes a cut-off reply with its size, cap and tail', () => {
+  assert.doesNotThrow(() => assertNotTruncated('{"categories":{}}', 'stop', 6000));
+
+  assert.throws(
+    () => assertNotTruncated(TRUNCATED_REPLY, 'length', 6000),
+    (error: unknown) => {
+      assert.ok(error instanceof LlmTruncationError, 'expected a dedicated truncation error');
+      assert.match(error.message, /truncated after \d+ chars/);
+      assert.match(error.message, /max_tokens=6000/);
+      assert.match(error.message, /LLM_MAX_OUTPUT_TOKENS/);
+      assert.match(error.message, /Tail: .*Google Deep/, 'the tail is what reveals the cut-off');
+      return true;
+    },
+  );
+});
+
+test('generateDigest fails fast on a truncated reply instead of replaying the prompt', async () => {
+  const { calls, error } = await withStubbedCompletions(
+    () => completionBody(TRUNCATED_REPLY, 'length'),
+    () => generateDigest([candidate(1)], LLM_CONFIG, { now: NOW }),
+  );
+
+  assert.ok(error instanceof LlmTruncationError, `expected LlmTruncationError, got ${String(error)}`);
+  assert.equal(calls, 1, 'retrying the same prompt would be cut off in the same place');
+});
+
+test('generateDigest still retries a complete but malformed reply once', async () => {
+  const { calls, error } = await withStubbedCompletions(
+    () => completionBody('I cannot help with that.'),
+    () => generateDigest([candidate(1)], LLM_CONFIG, { now: NOW }),
+  );
+
+  assert.ok(error instanceof LlmResponseError);
+  assert.ok(!(error instanceof LlmTruncationError), 'a complete reply is a formatting problem, not a truncation');
+  assert.match(error.message, /not valid JSON/);
+  assert.match(error.message, /last 200:/);
+  assert.equal(calls, 2, 'the repair attempt is still made');
+});
+
+test('generateDigest accepts a complete reply and keeps the allowlisted URL', async () => {
+  const reply = JSON.stringify({
+    categories: {
+      new_models: [{ title: 'Real', summary: 'Kept.', url: 'https://example.com/1', source: 'Feed 1' }],
+    },
+  });
+
+  const { calls, value } = await withStubbedCompletions(
+    () => completionBody(reply),
+    () => generateDigest([candidate(1)], LLM_CONFIG, { now: NOW }),
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(value?.kept, 1);
+  assert.equal(value?.attempts, 1);
+  assert.equal(value?.totalTokens, 100);
+  assert.equal(value?.digest.categories.new_models[0]?.url, 'https://example.com/1');
 });
 
 test('buildMessages carries the categories, the rules and the exact URLs', () => {

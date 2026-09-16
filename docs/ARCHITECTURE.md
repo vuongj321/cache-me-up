@@ -237,13 +237,22 @@ Where `Item` is:
   mode, adding a short "reply with JSON only" repair instruction. Raw newlines and
   tabs inside JSON strings are repaired automatically. If the second attempt also
   fails, the run fails loudly (visible in Actions) rather than silently posting
-  nothing.
+  nothing; the message reports the reply's length and both its first and last 200
+  characters, so a missing closing brace is obvious.
+- **Truncation is detected, not guessed:** `finish_reason` is read on every reply.
+  `length` (OpenAI) or `max_tokens` (several compatible providers) means the model
+  was cut off by `LLM_MAX_OUTPUT_TOKENS`, which produces JSON that no parser can
+  repair. That case raises `LlmTruncationError` immediately — replaying the same
+  prompt would be cut off in the same place — and names the two knobs that help
+  (`LLM_MAX_OUTPUT_TOKENS`, `MAX_CANDIDATES`).
 - **URL allowlist:** Any returned `url` not in the original candidate set is dropped
   (see [Step 6](#step-6--url-allowlist-validation-anti-hallucination)), and each
   surviving URL is emitted in its canonical form — the exact link that was fetched.
 - **Category hygiene:** Missing sections are filled with empty arrays, items are
   trimmed/collapsed, and a story that appears in two categories is kept only once.
-- **Token capping:** Input is limited to ~40–60 candidates (see [Step 4](#step-4--pre-rank-and-cap)).
+- **Token capping:** Input is limited to `maxCandidates` items (30 by default, see
+  [Step 4](#step-4--pre-rank-and-cap)) and the reply to `LLM_MAX_OUTPUT_TOKENS`
+  tokens (6000 by default).
 
 ---
 
@@ -407,7 +416,7 @@ Secrets and tunable settings are provided via environment variables, loaded from
 | `OPENAI_MODEL` | No | Override the default model name (`gpt-4o-mini`) |
 | `OPENAI_BASE_URL` | No | Point at an OpenAI-compatible provider |
 | `LOOKBACK_HOURS` | No | Freshness window (default 36); `sources.json` wins if it sets one |
-| `MAX_CANDIDATES` | No | LLM input cap (default 50) |
+| `MAX_CANDIDATES` | No | LLM input cap (default 30) |
 | `MAX_ITEMS_PER_SOURCE` | No | Per-source diversification cap (default 12) |
 | `SEEN_STORE_PATH` | No | Where the seen cache lives (default `data/seen.json`) |
 | `SEEN_WINDOW_DAYS` | No | How long delivered items stay suppressed (default 5) |
@@ -415,6 +424,7 @@ Secrets and tunable settings are provided via environment variables, loaded from
 | `DIGEST_POST_EMPTY` | No | `true` posts a "nothing new" note instead of staying silent |
 | `FETCH_TIMEOUT_MS` | No | Per-request HTTP timeout for fetchers (default 20000) |
 | `LLM_TIMEOUT_MS` | No | Timeout for the chat-completions call (default 120000) |
+| `LLM_MAX_OUTPUT_TOKENS` | No | Most tokens the model may write in one reply (default 6000); hitting it truncates the JSON and fails the run |
 | `LOG_LEVEL` | No | `debug` \| `info` \| `warn` \| `error` (default `info`) |
 | `GITHUB_TOKEN` | No | Raises the GitHub search API rate limit |
 
@@ -439,6 +449,7 @@ secret is absent and where to put it.
 | A single source is down/rate-limited | That source contributes no items | Fetchers are isolated; one failure is caught and logged without killing the whole run |
 | A source's markup or API changes (e.g. GitHub trending) | That adapter returns no items | Parsers are defensive: a zero-result parse logs an explicit warning instead of throwing, and `github-search` covers the same interest |
 | LLM returns malformed JSON | Pipeline can't build the digest | Response is validated against the schema, retried once (also covering providers that reject `response_format`), and then surfaced so the run fails loudly (visible in Actions) rather than silently posting nothing |
+| LLM reply cut off by the output budget (`finish_reason: length`) | Half-written JSON, so nothing can be parsed | Detected via `finish_reason` and reported as a truncation (with the token cap and the reply's tail) instead of a generic parse error; not retried, because the same prompt truncates in the same place. Fix with `LLM_MAX_OUTPUT_TOKENS` / `MAX_CANDIDATES` |
 | LLM returns an unknown URL | A broken/fabricated link | URL allowlist validation drops it |
 | Message > 2000 chars | Discord rejects the POST | Formatter splits into sequential messages |
 | Webhook returns 429/5xx | Message not sent | Retried with backoff (`Retry-After` honoured), and webhook URLs are validated before the LLM call is paid for |

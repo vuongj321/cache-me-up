@@ -78,7 +78,8 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
 
   log.info(
     `starting run — ${sources.length} source(s) enabled, ${disabled.length} disabled, ` +
-      `lookback ${lookbackHours}h, max ${maxCandidates} candidates${options.dryRun ? ' (dry run)' : ''}`,
+      `lookback ${lookbackHours}h, max ${maxCandidates} candidates, max_tokens ${env.llmMaxOutputTokens}` +
+      `${options.dryRun ? ' (dry run)' : ''}`,
   );
 
   // Step 2: fetch every enabled source (failures are isolated per source).
@@ -138,6 +139,7 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
     baseUrl: env.openaiBaseUrl,
     timeoutMs: env.llmTimeoutMs,
     maxCandidates,
+    maxOutputTokens: env.llmMaxOutputTokens,
   };
   const { digest, dropped } = await generateDigest(ranked, llmConfig, { now: startedAt, log });
 

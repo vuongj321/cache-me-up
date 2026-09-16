@@ -28,6 +28,7 @@ export interface AppEnv {
   postEmptyDigest: boolean;
   fetchTimeoutMs: number;
   llmTimeoutMs: number;
+  llmMaxOutputTokens: number;
   githubToken?: string;
 }
 
@@ -74,14 +75,14 @@ function boolFrom(value: string | undefined, fallback: boolean): boolean {
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   if (source === process.env) ensureDotenv();
 
-  const maxCandidates = intFrom(source.MAX_CANDIDATES, 50);
+  const maxCandidates = intFrom(source.MAX_CANDIDATES, 30);
   return {
     openaiApiKey: optional(source.OPENAI_API_KEY),
     openaiModel: optional(source.OPENAI_MODEL) ?? 'gpt-4o-mini',
     openaiBaseUrl: (optional(source.OPENAI_BASE_URL) ?? 'https://api.openai.com/v1').replace(/\/+$/, ''),
     discordWebhookUrl: optional(source.DISCORD_WEBHOOK_URL),
     lookbackHours: intFrom(source.LOOKBACK_HOURS, 36),
-    maxCandidates: maxCandidates > 0 ? maxCandidates : 50,
+    maxCandidates: maxCandidates > 0 ? maxCandidates : 30,
     maxItemsPerSource: intFrom(source.MAX_ITEMS_PER_SOURCE, 12),
     seenStorePath: optional(source.SEEN_STORE_PATH) ?? path.join('data', 'seen.json'),
     seenWindowDays: intFrom(source.SEEN_WINDOW_DAYS, 5),
@@ -90,6 +91,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     postEmptyDigest: boolFrom(source.DIGEST_POST_EMPTY, false),
     fetchTimeoutMs: intFrom(source.FETCH_TIMEOUT_MS, 20000),
     llmTimeoutMs: intFrom(source.LLM_TIMEOUT_MS, 120000),
+    llmMaxOutputTokens: intFrom(source.LLM_MAX_OUTPUT_TOKENS, 6000),
     githubToken: optional(source.GITHUB_TOKEN),
   };
 }

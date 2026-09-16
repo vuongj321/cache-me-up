@@ -20,6 +20,9 @@ import {
 } from './types';
 import { canonicalizeUrl, collapseWhitespace, truncate } from './util';
 
+/** Output budget used when `LlmConfig.maxOutputTokens` is not configured. */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 6000;
+
 export interface LlmConfig {
   apiKey: string;
   model: string;
@@ -27,6 +30,7 @@ export interface LlmConfig {
   timeoutMs: number;
   maxCandidates: number;
   temperature?: number;
+  /** Hard cap on how much the model may write; hitting it truncates the JSON. */
   maxOutputTokens?: number;
 }
 
@@ -55,6 +59,25 @@ export class LlmResponseError extends Error {
   }
 }
 
+/**
+ * The provider stopped mid-reply because the output budget ran out.
+ *
+ * This is not a formatting problem — no parser can complete a half-written JSON
+ * document — so it gets its own, actionable message, and it is never retried
+ * with the same prompt (the retry would truncate in exactly the same place).
+ */
+export class LlmTruncationError extends LlmResponseError {
+  constructor(
+    message: string,
+    readonly finishReason: string,
+    readonly maxOutputTokens: number,
+    rawResponse?: string,
+  ) {
+    super(message, rawResponse);
+    this.name = 'LlmTruncationError';
+  }
+}
+
 export function buildCandidatePayload(candidates: CandidateItem[]): LlmCandidate[] {
   return candidates.map((candidate) => ({
     title: truncate(candidate.title, 200),
@@ -77,7 +100,7 @@ const SYSTEM_PROMPT = [
   '- Write a factual 1-2 sentence summary per item. No hype, no emojis, no hashtags.',
   '- Prefer novel, engineer-relevant items and concrete shipped work over generic opinion pieces.',
   '- Skip anything that is an ad, a job posting, a webinar, or purely promotional.',
-  '- Aim for 3-5 items per category. Fewer (or none) is correct when quality is low.',
+  '- Aim for 2-4 items per category. Fewer (or none) is correct when quality is low.',
   '- Deduplicate: the same story from two feeds appears once, under the best-fitting category.',
   '- The "interest" field is only a weak hint; your judgement wins.',
   '',
@@ -197,7 +220,13 @@ export function extractJson(text: string): unknown {
     if (sliced !== undefined) return sliced;
   }
 
-  throw new LlmResponseError(`LLM response was not valid JSON (first 200 chars: ${truncate(trimmed, 200)})`, trimmed);
+  // A truncated reply always looks healthy at the front, so both ends (and the
+  // length) are reported — that is what makes this error diagnosable.
+  throw new LlmResponseError(
+    `LLM response was not valid JSON (${trimmed.length} chars; first 200: ${truncate(trimmed, 200)}; ` +
+      `last 200: ${truncate(trimmed.slice(-200), 200)})`,
+    trimmed,
+  );
 }
 
 /** Validate a raw response against the digest schema and fill missing categories. */
@@ -292,15 +321,27 @@ export function createEmptyDigest(now: Date = new Date()): Digest {
   return { generatedAt: now.toISOString(), categories };
 }
 
+/**
+ * The subset of the chat-completions payload this pipeline reads.
+ *
+ * `finish_reason` is the only reliable signal that a reply was cut off by the
+ * output budget (`"length"` on OpenAI, `"max_tokens"` on several compatible
+ * providers) rather than being genuinely malformed.
+ */
 interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string | null } | null } | null> | null;
-  usage?: { total_tokens?: number } | null;
+  choices?: Array<
+    { message?: { content?: string | null } | null; finish_reason?: string | null } | null
+  > | null;
+  usage?: { total_tokens?: number; completion_tokens?: number } | null;
   error?: { message?: string } | null;
 }
 
 export interface ChatCompletionResult {
   content: string;
+  /** Why the model stopped: `stop`, `length` (truncated), `content_filter`, … */
+  finishReason?: string;
   totalTokens?: number;
+  completionTokens?: number;
 }
 
 /**
@@ -316,7 +357,7 @@ export async function callChatCompletions(
     model: config.model,
     messages,
     temperature: config.temperature ?? 0.2,
-    max_tokens: config.maxOutputTokens ?? 2500,
+    max_tokens: config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
   };
   if (options.jsonMode !== false) body.response_format = { type: 'json_object' };
 
@@ -343,17 +384,51 @@ export async function callChatCompletions(
     throw new LlmResponseError(`LLM provider error: ${payload.error.message}`, response.text);
   }
 
+  const choice = payload.choices?.[0];
   const content = payload.choices?.[0]?.message?.content;
   if (!content) {
     throw new LlmResponseError('LLM response contained no message content', response.text);
   }
 
-  return { content, totalTokens: payload.usage?.total_tokens };
+  return {
+    content,
+    finishReason: choice?.finish_reason ?? undefined,
+    totalTokens: payload.usage?.total_tokens,
+    completionTokens: payload.usage?.completion_tokens,
+  };
 }
 
 const REPAIR_INSTRUCTION =
   'Your previous reply could not be parsed. Reply again with JSON only — no prose, no markdown code fences — ' +
   'matching the required shape exactly.';
+
+/** True when the provider stopped because it ran out of output budget. */
+export function isTruncated(finishReason: string | undefined | null): boolean {
+  return finishReason === 'length' || finishReason === 'max_tokens';
+}
+
+/**
+ * Throw when a reply was cut off by the output budget.
+ *
+ * Kept separate from the "malformed JSON" path on purpose: a truncated reply is
+ * a budget problem, and the fix (`LLM_MAX_OUTPUT_TOKENS` / `MAX_CANDIDATES`) is
+ * different from the fix for a model that wrote broken JSON.
+ */
+export function assertNotTruncated(
+  content: string,
+  finishReason: string | undefined,
+  maxOutputTokens: number,
+): void {
+  if (!isTruncated(finishReason)) return;
+  throw new LlmTruncationError(
+    `LLM output was truncated after ${content.length} chars because it hit max_tokens=${maxOutputTokens} ` +
+      `(finish_reason: ${finishReason}) — raise LLM_MAX_OUTPUT_TOKENS or lower MAX_CANDIDATES. ` +
+      `Tail: ${truncate(content.slice(-160), 160)}`,
+    finishReason as string,
+    maxOutputTokens,
+    content,
+  );
+}
 
 export interface GenerateDigestOptions {
   now?: Date;
@@ -377,6 +452,10 @@ export interface GenerateDigestResult {
  * Malformed output is retried once (without structured-output mode, which also
  * covers providers that reject `response_format`); a second failure throws so
  * the run fails loudly in Actions instead of silently posting nothing.
+ *
+ * Output that was cut off by the output budget is treated differently: replaying
+ * the same prompt with the same cap truncates again, so it fails immediately with
+ * a message naming the knobs that actually help.
  */
 export async function generateDigest(
   candidates: CandidateItem[],
@@ -384,6 +463,7 @@ export async function generateDigest(
   options: GenerateDigestOptions = {},
 ): Promise<GenerateDigestResult> {
   const now = options.now ?? new Date();
+  const maxOutputTokens = config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
   const capped = candidates.slice(0, config.maxCandidates);
   if (capped.length === 0) {
     return {
@@ -400,6 +480,7 @@ export async function generateDigest(
   let attempts = 0;
   let totalTokens: number | undefined;
   let lastError: Error | undefined;
+  let finishReason: string | undefined;
 
   for (let attempt = 1; attempt <= 2 && !raw; attempt += 1) {
     attempts = attempt;
@@ -409,13 +490,21 @@ export async function generateDigest(
     try {
       const completion = await callChatCompletions(config, conversation, { jsonMode: attempt === 1 });
       totalTokens = completion.totalTokens ?? totalTokens;
+      finishReason = completion.finishReason;
+      assertNotTruncated(completion.content, completion.finishReason, maxOutputTokens);
       raw = parseRawDigest(completion.content);
     } catch (error) {
       lastError = error as Error;
+      // Truncation is a budget problem, not a formatting one: retrying the very
+      // same prompt would be cut off in the same place, so fail straight away.
+      if (error instanceof LlmTruncationError) throw error;
       const retryable =
         error instanceof LlmResponseError || (error instanceof HttpError && (error.status === 400 || error.status === 404));
       if (!retryable) throw error;
-      options.log?.warn(`LLM attempt ${attempt} of 2 failed: ${lastError.message}`);
+      options.log?.warn(
+        `LLM attempt ${attempt} of 2 failed: ${lastError.message}` +
+          (finishReason ? ` (finish_reason: ${finishReason})` : ''),
+      );
     }
   }
 

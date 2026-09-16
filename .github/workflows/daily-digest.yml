@@ -36,6 +36,8 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
       OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
+      # Raise this (repo variable) if a run fails with "LLM output was truncated".
+      LLM_MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '6000' }}
       # Optional; raises the GitHub search API rate limit (not the trending scrape).
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LOG_LEVEL: ${{ inputs.log_level || 'info' }}

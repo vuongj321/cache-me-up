@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import test from 'node:test';
-import { loadSources, parseSourcesFile } from '../src/config';
+import { loadEnv, loadSources, parseSourcesFile } from '../src/config';
 import { buildArxivUrl } from '../src/fetchers/arxiv';
 import { FETCHERS, sanitizeCandidate, sanitizeCandidates } from '../src/fetchers';
 import { mapSearchRepos, mapTrendingRepos, parseTrendingHtml } from '../src/fetchers/github';
@@ -232,7 +232,17 @@ test('config/sources.json is valid and every source kind has a fetcher', () => {
     assert.ok(FETCHERS[source.kind], `no fetcher registered for kind "${source.kind}" (${source.id})`);
   }
   assert.equal(loaded.settings.lookbackHours, 36);
-  assert.equal(loaded.settings.maxCandidates, 50);
+  assert.equal(loaded.settings.maxCandidates, 30);
+});
+
+test('loadEnv defaults keep the LLM input small and the output budget generous', () => {
+  const defaults = loadEnv({});
+  assert.equal(defaults.maxCandidates, 30);
+  assert.equal(defaults.llmMaxOutputTokens, 6000);
+
+  const overridden = loadEnv({ MAX_CANDIDATES: '12', LLM_MAX_OUTPUT_TOKENS: '9000' });
+  assert.equal(overridden.maxCandidates, 12);
+  assert.equal(overridden.llmMaxOutputTokens, 9000);
 });
 
 test('parseSourcesFile rejects typos, bad kinds and duplicate ids', () => {
