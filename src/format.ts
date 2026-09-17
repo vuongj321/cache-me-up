@@ -9,7 +9,7 @@
 
 import type { DiscordEmbed, DiscordEmbedField, DiscordMessage } from './discord';
 import { CATEGORY_DEFINITIONS, type Digest, type DigestItem } from './types';
-import { clamp, truncate } from './util';
+import { clamp, collapseWhitespace, truncate } from './util';
 
 /** Discord rejects message content longer than this. */
 export const DISCORD_MESSAGE_LIMIT = 2000;
@@ -39,9 +39,9 @@ export interface FormatOptions {
   embedsPerMessage?: number;
 }
 
-/** Escape characters Discord would interpret as markdown. */
+/** Escape characters Discord would interpret as markdown (only rendered in field *values*). */
 export function escapeMarkdown(text: string): string {
-  return (text ?? '').replace(/[\\*_~`|>[\]]/g, (match) => `\\${match}`).replace(/\s+/g, ' ').trim();
+  return collapseWhitespace(text ?? '').replace(/[\\*_~`|>[\]]/g, (match) => `\\${match}`);
 }
 
 /** YYYY-MM-DD in UTC (the schedule is UTC-based, see section 7.1). */
@@ -49,7 +49,10 @@ export function formatDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-/** Escape parentheses/whitespace so a URL cannot break out of `[label](url)`. */
+/**
+ * Build a masked link. Only safe in text Discord renders markdown in — message
+ * content, embed descriptions and field *values* — never in a field *name*.
+ */
 function maskLink(label: string, url: string): string {
   return `[${label}](${url.replace(/[()\s]/g, (match) => encodeURIComponent(match))})`;
 }
@@ -61,24 +64,23 @@ function plural(count: number, noun: string): string {
 /**
  * One item inside a section card.
  *
- * The item title becomes the clickable line (field `name`), the summary stays
- * plain body text, and the source is demoted to subtext (`-#`) — three pieces of
- * information with three visual weights, instead of one crowded line.
+ * Discord renders markdown in a field's *value* but never in its *name*, so a
+ * masked link in the name would print its brackets literally. The title therefore
+ * stays bare text and the link rides on the source subtext — three pieces of
+ * information with three visual weights (title line, summary body, grey
+ * attribution) instead of one crowded line.
  */
 export function formatItemField(item: DigestItem): DiscordEmbedField {
-  const title = escapeMarkdown(item.title) || 'Untitled';
+  const title = collapseWhitespace(item.title ?? '') || 'Untitled';
   const summary = escapeMarkdown(item.summary);
   const source = escapeMarkdown(item.source) || 'link';
 
-  const linked = maskLink(truncate(title, Math.max(24, FIELD_NAME_LIMIT - item.url.length - 4)), item.url);
-  // A pathological URL can push the masked link past the name limit; then keep the
-  // readable title as the name and link from the value instead of losing the link.
-  const nameFits = linked.length <= FIELD_NAME_LIMIT;
-  const name = nameFits ? linked : truncate(title, FIELD_NAME_LIMIT);
-  const attribution = nameFits ? `-# ${source}` : `-# ${maskLink(source, item.url)}`;
+  // `-# ` + `[label]` + `(url)` has to fit in one value: shrink the label, never the URL.
+  const label = truncate(source, Math.max(1, FIELD_VALUE_LIMIT - item.url.length - 7));
+  const attribution = `-# ${maskLink(label, item.url)}`;
 
   const body = truncate(summary, Math.max(24, FIELD_VALUE_LIMIT - attribution.length - 1));
-  return { name, value: body ? `${body}\n${attribution}` : attribution };
+  return { name: truncate(title, FIELD_NAME_LIMIT), value: body ? `${body}\n${attribution}` : attribution };
 }
 
 /** Header line for the first message: the date plus a compact item/section count. */

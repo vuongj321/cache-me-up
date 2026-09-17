@@ -179,8 +179,11 @@ cards**, one per non-empty category:
   a subtext line with the item/section counts).
 - One **embed per section**, carrying that section's accent colour and an emoji
   title (e.g. `🧠 New AI models`).
-- One **field per item**, where the item title is the clickable line, the summary
-  stays plain body text, and the source is demoted to subtext (`-# GitHub Trending`).
+- One **field per item**: the item title stays bare text in the field's *name*, the
+  summary is the body, and the source becomes a subtext **link** in the field's
+  *value* (`-# [GitHub Trending](https://…)`). Discord renders markdown in a field's
+  value but **never in its name**, so a masked link in the name would print its
+  brackets and parentheses literally.
 
 The result is three visual weights (title, body, attribution) instead of one crowded
 bullet line, with the accent colour grouping each section at a glance:
@@ -190,9 +193,9 @@ bullet line, with the accent colour grouping each section at a glance:
 -# 13 items across 4 sections
 
 ▐ 🧠 New AI models                                  ◄ accent bar
-  [JustVugg / colibri](https://github.com/JustVugg/colibri)
+  JustVugg / colibri
   A pure-C inference engine with zero dependencies …
-  -# GitHub Trending
+  -# [GitHub Trending](https://github.com/JustVugg/colibri)
 ▐ 💡 Project inspiration                             ◄ accent bar
   …
 ```

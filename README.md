@@ -20,19 +20,21 @@ Actions schedule, with no server to run.
 | **AI / programming concepts** | Papers, explainers, techniques |
 | **Cool builds** | Impressive projects and tools people have shipped |
 
-Each section is posted as a **coloured embed card**: the item title is the clickable
-line, the summary is plain body text, and the source is demoted to small grey
-subtext — so a section header never has to be repeated when a digest is split:
+Each section is posted as a **coloured embed card**: the title line is plain text,
+the summary is the body, and the source is demoted to small grey subtext — a real
+link, because **Discord renders markdown in an embed field's *value* only, never in
+its name**. That also means a section header never has to be repeated when a digest
+is split:
 
 ```
 ## Daily Tech Digest — 2026-09-16
 -# 13 items across 4 sections
 
 ▐ 🧠 New AI models                                    ◄ blurple accent bar
-  [JustVugg / colibri](https://github.com/JustVugg/colibri)
+  JustVugg / colibri
   A pure-C inference engine with zero dependencies that runs frontier
   mixture-of-experts models on hardware you already own…
-  -# GitHub Trending
+  -# [GitHub Trending](https://github.com/JustVugg/colibri)
 ▐ 💡 Project inspiration                              ◄ yellow accent bar
   …
 ```

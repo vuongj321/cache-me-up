@@ -7,6 +7,7 @@ import {
   EMBED_CHAR_LIMIT,
   EMBED_FIELD_LIMIT,
   EMBEDS_PER_MESSAGE,
+  FIELD_NAME_LIMIT,
   FIELD_VALUE_LIMIT,
   embedChars,
   escapeMarkdown,
@@ -40,24 +41,42 @@ function fields(message: DiscordMessage | undefined): DiscordEmbedField[] {
   return (message?.embeds ?? []).flatMap((embed) => embed.fields ?? []);
 }
 
-test('formatItemField makes the title the clickable line and demotes the source to subtext', () => {
+test('formatItemField keeps the title as plain field-name text and links the source in the value', () => {
   assert.deepEqual(formatItemField(item(1)), {
-    name: '[Title 1](https://example.com/1)',
-    value: 'Summary 1.\n-# Source',
+    name: 'Title 1',
+    value: 'Summary 1.\n-# [Source](https://example.com/1)',
   });
 });
 
-test('formatItemField escapes markdown and truncates what Discord would reject', () => {
+test('formatItemField never puts a masked link in the field name (Discord prints it literally)', () => {
+  const field = formatItemField(
+    item(1, {
+      title: 'DeepSeek-v4.1 Flash: Pushing the Limits of KV Cache Compression',
+      url: 'https://zartbot.github.io/blog/model_arch/dsv41flash_arch/en.html',
+    }),
+  );
+
+  assert.equal(field.name, 'DeepSeek-v4.1 Flash: Pushing the Limits of KV Cache Compression');
+  assert.ok(!field.name.includes(']('), `name was ${field.name}`);
+  assert.match(field.value, /-# \[Source\]\(https:\/\/zartbot\.github\.io\/blog\/model_arch\/dsv41flash_arch\/en\.html\)$/);
+});
+
+test('formatItemField keeps field names plain and stays inside the field limits', () => {
   const field = formatItemField(item(1, { title: '**Bold** _x_', summary: 'y'.repeat(4000) }));
-  assert.ok(field.name.startsWith('[\\*\\*Bold\\*\\* \\_x\\_'), `name was ${field.name}`);
+  // Markdown characters are left bare in the name: Discord does not parse the name,
+  // so an escape would show up as a literal backslash instead.
+  assert.equal(field.name, '**Bold** _x_');
+  assert.ok(field.value.startsWith('yyy'), `value was ${field.value.slice(0, 12)}`);
   assert.ok(field.value.length <= FIELD_VALUE_LIMIT, `value was ${field.value.length} chars`);
-  assert.ok(field.value.endsWith('-# Source'), `value was ${field.value.slice(-40)}`);
+  assert.ok(field.value.endsWith('-# [Source](https://example.com/1)'), `value was ${field.value.slice(-40)}`);
 
   const longTitle = formatItemField(
     item(1, { title: 't'.repeat(500), url: `https://example.com/${'u'.repeat(300)}` }),
   );
-  assert.ok(longTitle.name.length <= 256, `name was ${longTitle.name.length} chars`);
-  assert.ok(longTitle.value.includes('[Source](https://example.com/'), 'the fallback keeps the link in the value');
+  assert.ok(longTitle.name.length <= FIELD_NAME_LIMIT, `name was ${longTitle.name.length} chars`);
+  assert.ok(!longTitle.name.includes(']('), 'a long URL must never leak back into the name');
+  assert.ok(longTitle.value.includes('[Source](https://example.com/'), 'the link stays in the value');
+  assert.ok(longTitle.value.length <= FIELD_VALUE_LIMIT, `value was ${longTitle.value.length} chars`);
 });
 
 test('escapeMarkdown neutralizes Discord markdown and newlines', () => {
@@ -80,7 +99,7 @@ test('formatDigestMessages gives each non-empty section one coloured card and om
   assert.equal(builds?.title, '🛠️ Cool builds');
   assert.equal(builds?.color, CATEGORY_DEFINITIONS[3]?.color);
   assert.ok(!(message?.content ?? '').includes('Project inspiration'), 'empty categories are omitted');
-  assert.deepEqual(fields(message)[0], { name: '[Title 1](https://example.com/1)', value: 'Summary 1.\n-# Source' });
+  assert.deepEqual(fields(message)[0], { name: 'Title 1', value: 'Summary 1.\n-# [Source](https://example.com/1)' });
 });
 
 test('a section that outgrows one card continues without repeating its header', () => {
@@ -143,7 +162,8 @@ test('messagesToPlainText renders every card for dry runs', () => {
 
   assert.match(text, /----- message 1\/1 -----/);
   assert.match(text, /▐ 🧠 New AI models/);
-  assert.match(text, /\[Title 1\]\(https:\/\/example\.com\/1\)/);
+  assert.match(text, /• Title 1/);
+  assert.match(text, /-# \[Source\]\(https:\/\/example\.com\/1\)/);
   assert.match(text, /Summary 1\./);
 });
 
@@ -162,4 +182,24 @@ test('every item reaches the message, across all four categories', () => {
 
   assert.equal(rendered.length, posted, 'posting the digest must not drop an item');
   assert.equal(new Set(rendered.map((field) => field.name)).size, posted, 'no item is rendered twice');
+});
+
+test('no field name carries markdown, whatever the source data looks like', () => {
+  const messages = formatDigestMessages(
+    digest({
+      new_models: [item(1, { title: '[Show HN] A linker (beta)', url: 'https://news.ycombinator.com/item?id=1' })],
+      concepts: [item(2, { title: 'Caching _everything_ | a deep dive' })],
+    }),
+    { date: DATE },
+  );
+  const names = messages
+    .flatMap((message) => message.embeds ?? [])
+    .flatMap((embed) => embed.fields ?? [])
+    .map((field) => field.name);
+
+  assert.equal(names.length, 2);
+  for (const name of names) {
+    assert.ok(!name.includes(']('), `name looked like a masked link: ${name}`);
+    assert.ok(!name.includes('\\'), `a plain-text field name must not be escaped: ${name}`);
+  }
 });
