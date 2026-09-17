@@ -38,7 +38,7 @@ Before diving into the architecture, here are the two external concepts the syst
 
 A **cron job** is just *a task that runs automatically on a repeating schedule*.
 
-- "Cron" originally refers to the Unix/Linux utility `cron`, whose configuration uses a special syntax of five time fields. For example, `0 11 * * *` means "at minute 0, hour 11, every day, every month, every day of the week" — i.e. **11:00 every day**.
+- "Cron" originally refers to the Unix/Linux utility `cron`, whose configuration uses a special syntax of five time fields. For example, `5 10 * * *` means "at minute 5, hour 10, every day, every month, every day of the week" — i.e. **10:05 every day**.
 - You don't need a server running `cron` yourself here. Instead, **GitHub Actions** provides the scheduler. A workflow file in the repo declares the same `cron:` expression, and GitHub's infrastructure wakes up and runs the pipeline at that time.
 
 The key idea to remember: *the system does not need to be "always on."* GitHub Actions spins up a fresh, temporary virtual machine on schedule, runs the code once, and tears it down. This keeps the project free and serverless.
@@ -99,7 +99,7 @@ Each stage has a single responsibility, which makes the system easy to test and 
 
 ### Step 1 — Cron triggers the run
 
-At **11:00 UTC** (5:00 AM CST) each day, GitHub Actions starts the workflow. The run can also be triggered manually via the "Run workflow" button (`workflow_dispatch`).
+At **5:00 AM Central Time** each day, GitHub Actions starts the workflow. GitHub's cron is UTC-only, so *two* entries (`5 10 * * *` and `5 11 * * *`) cover daylight saving time and a tiny **`gate` job** lets today's through — see [7.2 What the workflow does](#72-what-the-workflow-does). The run can also be triggered manually via the "Run workflow" button (`workflow_dispatch`).
 
 See [GitHub Actions and scheduling](#7-github-actions-and-scheduling) for the full explanation of how this works.
 
@@ -339,16 +339,24 @@ GitHub Actions is a service that runs **workflows** (small programs described in
 
 For this project, the workflow file `.github/workflows/daily-digest.yml` declares two triggers:
 
-1. **Schedule (`cron`)** — `'0 11 * * *'`, i.e. daily at 11:00 UTC (5:00 AM CST).
+1. **Schedule (`cron`)** — two entries, `'5 10 * * *'` and `'5 11 * * *'`. GitHub cron is always UTC and cannot follow daylight saving time, so both hours that can be 5:00 AM local are scheduled; the **`gate` job** ([7.2](#72-what-the-workflow-does)) lets through only today's.
 2. **Manual (`workflow_dispatch`)** — a button in the GitHub UI to run on demand.
 
-> **Note on schedule accuracy:** GitHub does not guarantee cron workflows fire at the exact minute; they can be delayed (often by a few minutes to over an hour under load). The design therefore treats the time as "roughly daily," which is fine for a digest.
+> **Note on schedule accuracy:** GitHub does not guarantee cron workflows fire at the exact minute; they can be delayed (often by a few minutes to over an hour under load), and runs queued at the start of an hour (`:00`) are the most likely to be delayed or dropped — which is why these entries fire at minute `5`. The design therefore treats the time as "roughly daily," which is fine for a digest.
 
-> **Note on time zones:** GitHub schedules run in **UTC**, not local time. 5:00 AM CST (Central *Standard* Time, UTC−6) corresponds to **11:00 UTC**. If you instead want the digest at 5:00 AM *local wall-clock time* year-round, keep in mind that Central observes Daylight Saving Time (CDT, UTC−5) from roughly March to November, so you'd switch the schedule to `0 10 * * *` during the summer months.
+> **Note on time zones:** GitHub schedules run in **UTC**, not local time, and there is no daylight-saving support: 5:00 AM CST (Central *Standard* Time, UTC−6) is **11:00 UTC**, while the same 5:00 AM during Daylight Saving Time (CDT, UTC−5, roughly March to November) is **10:00 UTC**. Instead of editing the file twice a year — or silently drifting an hour twice a year — the workflow schedules **both** (`5 10 * * *` and `5 11 * * *`) and the `gate` job keeps the entry that matches today's UTC offset for 5:00 AM in `America/Chicago`. Exactly one of the two runs the digest; the other is skipped in seconds.
 
 ### 7.2 What the workflow does
 
-Each run:
+The workflow starts with a tiny **`gate` job** — no checkout, no install, a few seconds — that decides whether this run is today's 5:00 AM:
+
+1. A manual (`workflow_dispatch`) run always proceeds.
+2. For a scheduled run the gate reads the cron entry that triggered it (`5 10 * * *` → `10`) and compares it with the UTC hour that is 5:00 AM in `America/Chicago` **today** (`10` on CDT, `11` on CST).
+3. Match → the `digest` job runs. Mismatch → `digest` is **skipped**, which GitHub reports as a successful run with a grey job, not a failure.
+
+Keying off the *cron entry* instead of the clock is what makes this robust: a run that GitHub delayed by forty minutes still runs, because it is still the entry that belongs to today.
+
+Each run of the `digest` job:
 
 1. Spins up a fresh **Ubuntu runner** (temporary virtual machine).
 2. Checks out the repository.
@@ -374,7 +382,11 @@ The solution is **`actions/cache`**, a GitHub Actions feature that can save a se
 - On run end: **save** the updated `data/seen.json` back to cache.
 
 The cache key includes the workflow **run id**, so every run writes a fresh entry,
-while `restore-keys: seen-v2-` picks up the newest previous entry. GitHub evicts cache
+while `restore-keys: seen-v2-` picks up the newest previous entry. The `v2-` prefix
+has to appear on **both** the save step and the restore step: `restore-keys` is a
+*prefix* match, so a save key without it is never restored and deduplication silently
+stops working (which is exactly what happened when the save step wrote `seen-…` while
+the restore step looked for `seen-v2-` — every run started cold). GitHub evicts cache
 entries that have not been read for ~7 days, which naturally makes the seen list
 "short-lived" — old entries fall out of the active window, so very old items are
 allowed to resurface later. This matches the design goal of suppressing repeats for
@@ -499,7 +511,7 @@ These boundaries keep v1 small, cheap, and reliable — a single scheduled scrip
 A single day's run looks like this:
 
 ```
-11:00 UTC ──► GitHub Actions spins up a runner
+5:00 AM CT ──► gate job picks today's cron (10:05 or 11:05 UTC) ──► runner starts
                 ├─ checkout repo, setup Node 20, npm ci
                 ├─ restore data/seen.json from cache
                 ├─ npm run digest

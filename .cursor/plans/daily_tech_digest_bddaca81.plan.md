@@ -27,7 +27,7 @@ isProject: false
 - **Gathering:** Hybrid — RSS/APIs for candidates, LLM for filter / categorize / summarize
 - **Runtime:** GitHub Actions scheduled workflow
 - **Delivery:** Single Discord channel via webhook (embeds or markdown)
-- **Defaults:** TypeScript (Node 20), OpenAI-compatible chat API (`OPENAI_API_KEY` + configurable model), schedule **11:00 UTC** (5:00 AM CST)
+- **Defaults:** TypeScript (Node 20), OpenAI-compatible chat API (`OPENAI_API_KEY` + configurable model), schedule **5:00 AM Central** — DST-aware via two crons (`5 10 * * *` on CDT, `5 11 * * *` on CST) plus a `gate` job
 
 ## Architecture
 
@@ -111,7 +111,7 @@ cache-me-up/
 
 `[/.github/workflows/daily-digest.yml](.github/workflows/daily-digest.yml)`:
 
-- `schedule: cron: '0 11 * * *'` plus `workflow_dispatch` for manual runs
+- `schedule: cron: '5 10 * * *'` + `'5 11 * * *'` (a `gate` job keeps today's 5:00 AM local) plus `workflow_dispatch` for manual runs
 - Node setup → `npm ci` → `npm run digest`
 - Secrets: `OPENAI_API_KEY`, `DISCORD_WEBHOOK_URL` (optional `OPENAI_MODEL`, `OPENAI_BASE_URL` for compatible providers)
 - Persist `data/seen.json` via `actions/cache` keyed by date window so repeats are suppressed across runs

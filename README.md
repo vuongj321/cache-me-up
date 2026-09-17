@@ -177,11 +177,15 @@ to the channel.
 **Run workflow** — with *dry run* ticked first if you want to see the output
 without posting.
 
-**Schedule:** `cron: '0 11 * * *'` → 11:00 UTC, which is **5:00 AM CST**. GitHub
-runs schedules in UTC and does not guarantee the exact minute (delays of minutes
-to an hour happen under load). During Central Daylight Time (roughly March–November)
-11:00 UTC is 6:00 AM local; change the cron to `0 10 * * *` if you want 5:00 AM
-wall-clock time year-round.
+**Schedule:** **5:00 AM Central Time**, year-round. GitHub cron is always UTC and
+has no daylight-saving support, so the workflow lists both hours that can be
+5:00 AM local — `'5 10 * * *'` (5:05 AM CDT, UTC−5) and `'5 11 * * *'` (5:05 AM
+CST, UTC−6) — and a small **`gate` job** lets only the entry that is today's
+5:00 AM in `America/Chicago` through to the digest; the other run ends in seconds
+with a *skipped* `digest` job (grey, not red). The gate keys off the cron entry
+that fired rather than the wall clock, so a run GitHub delayed past the hour still
+goes ahead. Scheduling at minute `5` is deliberate: GitHub documents the start of
+every hour as a high-load window where queued runs can be delayed or dropped.
 
 **Dedupe cache:** runners are ephemeral, so `data/seen.json` is restored at the
 start of each run and saved at the end via `actions/cache`. Every run writes a new
@@ -223,7 +227,7 @@ cache-me-up/
     util.ts / log.ts           # small shared helpers
   tests/                       # unit tests (no network access required)
   .github/workflows/ci.yml             # typecheck + tests on push/PR
-  .github/workflows/daily-digest.yml   # the daily cron
+  .github/workflows/daily-digest.yml   # the daily cron (5:00 AM CT, DST-aware)
 ```
 
 ## Troubleshooting
@@ -238,6 +242,8 @@ cache-me-up/
 | Nothing was posted | Either `DIGEST_POST_EMPTY=false`, or nothing qualified. The default posts a "Nothing new worth sharing today" card |
 | Links look short/rewritten | Not possible: any URL that was not in the fetched candidate set is dropped by the allowlist |
 | Digest arrives in several messages | Working as intended — Discord allows 10 embeds / 6000 characters of embeds per message. Each section is one card, and continuation messages never repeat a header |
+| A scheduled run shows a *skipped* `digest` job | Expected — the `gate` job declined the cron entry that is not today's 5:00 AM local (`America/Chicago`). The other entry (`10:05` or `11:05` UTC) runs the digest |
+| The scheduled run never appears in the Actions tab | GitHub queues schedules best-effort: lots of runs queue at the top of the hour, so minute `:00` entries are the ones most likely to be delayed or dropped under load (the workflow uses minute `5` for that reason). GitHub also auto-disables a `cron` workflow after ~60 days without repository activity. **Run workflow** always posts |
 
 ## Costs and limits
 
