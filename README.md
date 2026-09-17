@@ -145,8 +145,8 @@ Copy `.env.example` to `.env` for local runs, or use GitHub secrets (below).
 | `MAX_ITEMS_PER_SOURCE` | no | `12` | Per-source diversification cap |
 | `SEEN_STORE_PATH` | no | `data/seen.json` | Dedupe cache location |
 | `SEEN_WINDOW_DAYS` | no | `5` | How long a delivered item stays suppressed |
-| `CONSIDERED_WINDOW_DAYS` | no | `2` | How long an LLM-reviewed item stays suppressed |
-| `DIGEST_POST_EMPTY` | no | `false` | Post a "nothing new" note instead of staying silent |
+| `CONSIDERED_WINDOW_DAYS` | no | `2` | Legacy only: ages out "considered" entries written by older versions |
+| `DIGEST_POST_EMPTY` | no | `true` | Post a "nothing new" note when nothing qualifies (`false` stays silent) |
 | `FETCH_TIMEOUT_MS` | no | `20000` | Per-request HTTP timeout |
 | `LLM_MAX_OUTPUT_TOKENS` | no | `6000` | Most tokens the model may write; a reply cut off by this fails the run |
 | `LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error` |
@@ -186,7 +186,9 @@ wall-clock time year-round.
 **Dedupe cache:** runners are ephemeral, so `data/seen.json` is restored at the
 start of each run and saved at the end via `actions/cache`. Every run writes a new
 cache key and `restore-keys` picks up the newest previous one, which is what makes
-the seen list "a few days long" rather than permanent.
+the seen list "a few days long" rather than permanent. Only items that actually
+reached the posted message are recorded, so a run that posts nothing records
+nothing — those candidates are offered again on the next run.
 
 ## Local development
 
@@ -233,7 +235,7 @@ cache-me-up/
 | `github-trending` parsed 0 repositories | GitHub changed its markup; the `github-search` source still covers new repos |
 | `LLM response was not valid JSON` / `did not match the digest schema` | The call is retried once without structured-output mode, then the run fails loudly so you see it in Actions. The message shows the reply's length plus its first **and last** 200 characters, so an incomplete trailing brace is visible |
 | `LLM output was truncated ... hit max_tokens=` | The model ran out of output budget mid-reply, so the JSON has no closing braces and cannot be parsed. Not retried (the same prompt truncates in the same place). Raise `LLM_MAX_OUTPUT_TOKENS` or lower `MAX_CANDIDATES` |
-| Nothing was posted | The digest was empty after filtering (default = stay silent). Set `DIGEST_POST_EMPTY=true` for a "nothing new" note |
+| Nothing was posted | Either `DIGEST_POST_EMPTY=false`, or nothing qualified. The default posts a "Nothing new worth sharing today" card |
 | Links look short/rewritten | Not possible: any URL that was not in the fetched candidate set is dropped by the allowlist |
 | Digest arrives in several messages | Working as intended — Discord allows 10 embeds / 6000 characters of embeds per message. Each section is one card, and continuation messages never repeat a header |
 
@@ -245,6 +247,8 @@ cache-me-up/
   public feeds/APIs, and a Discord webhook.
 - Set `LOG_LEVEL=debug` (or dispatch the workflow with `log_level: debug`) to see
   per-source item counts.
+- Only items that reached the posted message enter the dedupe cache, so a run that
+  posts nothing (or that rejects a candidate) offers those items again next run.
 
 ## Out of scope (v1)
 

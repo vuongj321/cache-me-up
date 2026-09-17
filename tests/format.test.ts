@@ -146,3 +146,20 @@ test('messagesToPlainText renders every card for dry runs', () => {
   assert.match(text, /\[Title 1\]\(https:\/\/example\.com\/1\)/);
   assert.match(text, /Summary 1\./);
 });
+
+test('every item reaches the message, across all four categories', () => {
+  const mixed = digest({
+    new_models: [item(1), item(2)],
+    project_inspiration: [item(3)],
+    concepts: Array.from({ length: EMBED_FIELD_LIMIT + 2 }, (_, index) => item(100 + index)),
+    cool_builds: [item(4), item(5), item(6)],
+  });
+
+  const rendered = formatDigestMessages(mixed, { date: DATE })
+    .flatMap((message) => message.embeds ?? [])
+    .flatMap((embed) => embed.fields ?? []);
+  const posted = CATEGORIES.reduce((total, key) => total + (mixed.categories[key] ?? []).length, 0);
+
+  assert.equal(rendered.length, posted, 'posting the digest must not drop an item');
+  assert.equal(new Set(rendered.map((field) => field.name)).size, posted, 'no item is rendered twice');
+});

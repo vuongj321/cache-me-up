@@ -88,7 +88,7 @@ export function formatHeader(date: Date, itemCount?: number, sectionCount?: numb
   return `${header}\n-# ${plural(itemCount, 'item')} across ${plural(sectionCount, 'section')}`;
 }
 
-/** Message posted when a run produces nothing (only if DIGEST_POST_EMPTY=true). */
+/** Message posted when a run produces nothing (`DIGEST_POST_EMPTY`, default true). */
 export function formatNothingNew(date: Date = new Date()): DiscordMessage[] {
   return [
     {

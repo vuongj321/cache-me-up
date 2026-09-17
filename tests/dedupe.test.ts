@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  digestSeenKeys,
   filterUnseen,
   markSeen,
   parseSeenStore,
@@ -9,7 +10,7 @@ import {
   emptySeenStore,
   type SeenStore,
 } from '../src/dedupe';
-import type { CandidateItem } from '../src/types';
+import type { CandidateItem, Digest } from '../src/types';
 
 const NOW = new Date('2026-09-16T11:00:00.000Z');
 
@@ -97,4 +98,26 @@ test('markSeen records new keys, refreshes timestamps and never downgrades deliv
   assert.equal(delivered.entries.fresh?.delivered, true);
   // Pure updates: the input store is untouched.
   assert.equal(store.entries.fresh, undefined);
+});
+
+test('digestSeenKeys returns one canonical key per posted item, across all categories', () => {
+  const posted: Digest = {
+    generatedAt: NOW.toISOString(),
+    categories: {
+      new_models: [
+        { title: 'A', summary: 'a', url: 'https://www.Example.com/post/?utm_source=rss#top', source: 'Feed' },
+        { title: 'No url', summary: 'b', url: '', source: 'Feed' },
+      ],
+      project_inspiration: [],
+      concepts: [{ title: 'B', summary: 'b', url: 'https://example.com/post', source: 'Second feed' }],
+      cool_builds: [{ title: 'C', summary: 'c', url: 'https://example.com/other/', source: 'Feed' }],
+    },
+  };
+
+  assert.deepEqual(digestSeenKeys(posted), [
+    'https://example.com/post', // www, tracking params and the fragment are stripped
+    '', // no usable URL -> no key, and markSeen ignores empty keys
+    'https://example.com/post', // the same story from a second feed collapses to one key
+    'https://example.com/other', // trailing slash stripped
+  ]);
 });

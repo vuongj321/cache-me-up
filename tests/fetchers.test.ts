@@ -245,6 +245,11 @@ test('loadEnv defaults keep the LLM input small and the output budget generous',
   assert.equal(overridden.llmMaxOutputTokens, 9000);
 });
 
+test('an empty digest posts the "nothing new" note unless it is switched off', () => {
+  assert.equal(loadEnv({}).postEmptyDigest, true, 'the note is opt-out, not opt-in');
+  assert.equal(loadEnv({ DIGEST_POST_EMPTY: 'false' }).postEmptyDigest, false);
+});
+
 test('parseSourcesFile rejects typos, bad kinds and duplicate ids', () => {
   assert.throws(
     () => parseSourcesFile({ sources: [{ id: 'a', name: 'A', kind: 'rss', url: 'https://example.com/feed', typo: true }] }),

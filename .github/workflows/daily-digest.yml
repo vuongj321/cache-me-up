@@ -58,13 +58,16 @@ jobs:
       # The runner is ephemeral, so the seen cache is persisted between runs.
       # Each run saves a fresh key; `restore-keys` picks up the newest previous
       # one, which makes the seen list effectively "a few days" long.
+      # The `v2` prefix deliberately ignores caches written before the change that
+      # records only posted items — those hold "considered" entries for stories
+      # that were never sent, which would keep suppressing them for days.
       - name: Restore seen cache
         uses: actions/cache/restore@v4
         with:
           path: data/seen.json
-          key: seen-${{ github.run_id }}
+          key: seen-v2-${{ github.run_id }}
           restore-keys: |
-            seen-
+            seen-v2-
 
       - name: Run digest
         run: npm run digest ${{ inputs.dry_run && '-- --dry-run' || '' }}

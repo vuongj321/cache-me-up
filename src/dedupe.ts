@@ -9,7 +9,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import type { CandidateItem } from './types';
+import { CATEGORIES, type CandidateItem, type Digest } from './types';
 import { canonicalizeUrl } from './util';
 
 export const SEEN_STORE_VERSION = 1;
@@ -38,6 +38,19 @@ export interface DedupeWindow {
 export function seenKey(item: Pick<CandidateItem, 'url' | 'id'>): string {
   const canonical = canonicalizeUrl(item.url ?? '');
   return canonical || (item.id ?? '');
+}
+
+/**
+ * Seen keys for the items that were actually posted.
+ *
+ * The pipeline only ever records what reached the Discord message, so this is
+ * the single source of truth for "what counts as seen". Items with no usable URL
+ * produce an empty key, which `markSeen` ignores.
+ */
+export function digestSeenKeys(digest: Digest): string[] {
+  return CATEGORIES.flatMap((key) =>
+    (digest.categories[key] ?? []).map((item) => seenKey({ url: item.url, id: item.url })),
+  );
 }
 
 export function emptySeenStore(): SeenStore {

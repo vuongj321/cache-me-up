@@ -130,18 +130,22 @@ Why normalize everything to one shape? Because the next stages (dedupe, ranking,
 
 ### Step 3 — Dedupe against the "seen" cache
 
-The same story often appears across multiple feeds, and a story that was already sent yesterday shouldn't be re-sent today. To handle this, the pipeline keeps a **seen IDs cache** — a small file (`data/seen.json`) listing item IDs/URLs that were already delivered.
+The same story often appears across multiple feeds, and a story that was already sent yesterday shouldn't be re-sent today. To handle this, the pipeline keeps a **seen IDs cache** — a small file (`data/seen.json`) listing the URLs that were actually posted.
 
 - On each run, fetched items whose IDs are in the cache are removed (URLs are
   canonicalized first — tracking params, `www.`, fragments and trailing slashes are
   stripped — so the same story from three feeds collapses to one).
-- After a run, newly delivered IDs are added to the cache. IDs that were merely
-  *shown to the LLM* are added too, with a shorter window, so a rejected item is not
-  paid for again tomorrow but can still resurface later.
+- After a run, **only the items that reached the Discord message are added** to the
+  cache. A candidate that was never ranked, or that the LLM rejected, is not
+  recorded at all: it stays eligible for the rest of its lookback window, so a quiet
+  or empty run can never silence a story that was never sent.
+- Entries are a rolling window (**delivered**, default 5 days) rather than permanent,
+  so an item that reappears much later can still surface again.
 
-The cache therefore has two tiers: **delivered** items (default 5 days) and
-**considered** items (default 2 days). Both are rolling windows rather than
-permanent, so an item that reappears later can still surface again after a while.
+Earlier versions also wrote a shorter-lived **considered** tier for items that were
+merely shown to the LLM. Nothing writes that tier any more (`CONSIDERED_WINDOW_DAYS`
+now only ages out leftovers from those caches), because suppressing unposted items is
+what made a second run in the same day come back empty.
 In GitHub Actions, this file is persisted between runs using the **`actions/cache`**
 feature (see [State and caching](#73-state-and-caching)).
 
@@ -200,7 +204,7 @@ card continues in a second card with the **same accent colour and no title**, an
 new message is only started once a limit is reached — so no header is ever printed
 twice.
 
-If the entire digest is empty after filtering, the default behavior is to **skip posting** (to reduce noise). Optionally it can post a short "nothing new today" note, as a single card.
+If the entire digest is empty after filtering — nothing survived the seen cache, or the LLM kept nothing — the pipeline posts a short "Nothing new worth sharing today." card, so the channel always gets exactly one message per run. Set `DIGEST_POST_EMPTY=false` to stay silent instead.
 
 ### Step 8 — Post to Discord
 
@@ -370,7 +374,7 @@ The solution is **`actions/cache`**, a GitHub Actions feature that can save a se
 - On run end: **save** the updated `data/seen.json` back to cache.
 
 The cache key includes the workflow **run id**, so every run writes a fresh entry,
-while `restore-keys: seen-` picks up the newest previous entry. GitHub evicts cache
+while `restore-keys: seen-v2-` picks up the newest previous entry. GitHub evicts cache
 entries that have not been read for ~7 days, which naturally makes the seen list
 "short-lived" — old entries fall out of the active window, so very old items are
 allowed to resurface later. This matches the design goal of suppressing repeats for
@@ -442,8 +446,8 @@ Secrets and tunable settings are provided via environment variables, loaded from
 | `MAX_ITEMS_PER_SOURCE` | No | Per-source diversification cap (default 12) |
 | `SEEN_STORE_PATH` | No | Where the seen cache lives (default `data/seen.json`) |
 | `SEEN_WINDOW_DAYS` | No | How long delivered items stay suppressed (default 5) |
-| `CONSIDERED_WINDOW_DAYS` | No | How long LLM-reviewed-but-not-delivered items stay suppressed (default 2) |
-| `DIGEST_POST_EMPTY` | No | `true` posts a "nothing new" note instead of staying silent |
+| `CONSIDERED_WINDOW_DAYS` | No | Legacy only: ages out "considered" entries written by older versions (default 2) |
+| `DIGEST_POST_EMPTY` | No | Posts a "nothing new" note when nothing qualifies (default `true`; `false` stays silent) |
 | `FETCH_TIMEOUT_MS` | No | Per-request HTTP timeout for fetchers (default 20000) |
 | `LLM_TIMEOUT_MS` | No | Timeout for the chat-completions call (default 120000) |
 | `LLM_MAX_OUTPUT_TOKENS` | No | Most tokens the model may write in one reply (default 6000); hitting it truncates the JSON and fails the run |
@@ -475,7 +479,7 @@ secret is absent and where to put it.
 | LLM returns an unknown URL | A broken/fabricated link | URL allowlist validation drops it |
 | Digest larger than one message (≤10 embeds / 6000 embed chars) | Discord rejects the POST | Formatter packs cards into messages under the limits and continues a section without repeating its header |
 | Webhook returns 429/5xx | Message not sent | Retried with backoff (`Retry-After` honoured), and webhook URLs are validated before the LLM call is paid for |
-| Digest is empty after filtering | Nothing to say | Default: skip posting (noise reduction); optional "nothing new" note |
+| Digest is empty after filtering | Nothing to say | Posts a "Nothing new worth sharing today." card (default); `DIGEST_POST_EMPTY=false` stays silent |
 | Cache misses / cold start | No dedupe history, so first run may duplicate | Acceptable; subsequent runs rebuild the cache |
 
 ---

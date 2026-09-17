@@ -11,15 +11,14 @@
  *   npm run digest -- --help
  */
 
-import { assertSecrets, loadEnv, loadSources } from './config';
-import { filterUnseen, loadSeenStore, markSeen, saveSeenStore, seenKey, type SeenStore } from './dedupe';
+import { assertSecrets, loadEnv, loadSources, type AppEnv } from './config';
+import { digestSeenKeys, filterUnseen, loadSeenStore, markSeen, saveSeenStore, type SeenStore } from './dedupe';
 import { isValidWebhookUrl, maskWebhookUrl, postToDiscord } from './discord';
 import { createFetchContext, fetchAllSources } from './fetchers';
 import { formatDigestMessages, formatNothingNew, messagesToPlainText } from './format';
 import { countDigestItems, generateDigest, type LlmConfig } from './llm';
 import { createLogger, type Logger } from './log';
 import { rankAndCap } from './rank';
-import { CATEGORY_DEFINITIONS } from './types';
 
 export interface CliOptions {
   dryRun: boolean;
@@ -57,6 +56,36 @@ export function parseArgs(argv: string[]): CliOptions {
 function persistSeen(store: SeenStore, filePath: string, log: Logger): void {
   saveSeenStore(filePath, store);
   log.debug(`seen cache written: ${filePath} (${Object.keys(store.entries).length} entries)`);
+}
+
+/** The webhook shape check, shared by the digest path and the "nothing new" note. */
+function assertWebhookUrl(env: AppEnv): void {
+  if (!isValidWebhookUrl(env.discordWebhookUrl)) {
+    throw new Error(
+      'DISCORD_WEBHOOK_URL is not a Discord webhook URL (expected https://discord.com/api/webhooks/<id>/<token>).',
+    );
+  }
+}
+
+/**
+ * Post (or, in a dry run, print) the "nothing new worth sharing today" note.
+ *
+ * Both empty paths use it — nothing survived the seen cache, and the LLM kept
+ * nothing — so the channel always gets exactly one message per run. Discord is
+ * validated here because this path can run before the LLM stage.
+ */
+async function postNothingNew(env: AppEnv, options: CliOptions, log: Logger, date: Date): Promise<void> {
+  const note = formatNothingNew(date);
+  if (options.dryRun) {
+    log.info('dry run — would post the "nothing new" note:');
+    console.log(messagesToPlainText(note));
+    return;
+  }
+
+  assertSecrets(env, { discord: true });
+  assertWebhookUrl(env);
+  log.info(`posting "nothing new" note to ${maskWebhookUrl(env.discordWebhookUrl as string)}`);
+  await postToDiscord(env.discordWebhookUrl as string, note, { log, timeoutMs: env.fetchTimeoutMs });
 }
 
 /** Execute one digest run. Returns the process exit code. */
@@ -99,7 +128,7 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
   // Step 3: dedupe against the rolling seen cache.
   const store = loadSeenStore(env.seenStorePath);
   const dedupeWindow = { now: startedAt, deliveredDays: env.seenWindowDays, consideredDays: env.consideredWindowDays };
-  const { fresh, skipped, store: prunedStore, batchKeys } = filterUnseen(fetched.items, store, dedupeWindow);
+  const { fresh, skipped, store: prunedStore } = filterUnseen(fetched.items, store, dedupeWindow);
   log.info(`dedupe: ${fresh.length} unseen item(s), ${skipped} suppressed by ${env.seenStorePath}`);
 
   // Step 4: pre-rank + cap.
@@ -112,10 +141,15 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
   }
 
   if (ranked.length === 0) {
-    log.info('nothing new today — skipping the post');
-    if (!options.dryRun) {
-      persistSeen(markSeen(prunedStore, batchKeys, { now: startedAt, delivered: false }), env.seenStorePath, log);
+    log.info('nothing new today — every fetched item is already in the seen cache');
+    if (env.postEmptyDigest) {
+      await postNothingNew(env, options, log, startedAt);
+    } else {
+      log.info('skipping the post (set DIGEST_POST_EMPTY=true to post a note)');
     }
+    // Nothing was posted, so nothing is marked as seen — only the expired entries
+    // are dropped from the cache.
+    if (!options.dryRun) persistSeen(prunedStore, env.seenStorePath, log);
     return 0;
   }
 
@@ -126,11 +160,7 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
   }
 
   assertSecrets(env, { llm: true, discord: !options.dryRun });
-  if (!options.dryRun && !isValidWebhookUrl(env.discordWebhookUrl)) {
-    throw new Error(
-      'DISCORD_WEBHOOK_URL is not a Discord webhook URL (expected https://discord.com/api/webhooks/<id>/<token>).',
-    );
-  }
+  if (!options.dryRun) assertWebhookUrl(env);
 
   // Steps 5 + 6: LLM filter/categorize/summarize, then the URL allowlist.
   const llmConfig: LlmConfig = {
@@ -143,25 +173,19 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
   };
   const { digest, dropped } = await generateDigest(ranked, llmConfig, { now: startedAt, log });
 
-  // Ranked items are recorded as "considered" so they are not re-sent to the
-  // LLM every run while still being allowed to resurface after a couple of days.
-  const consideredStore = markSeen(prunedStore, batchKeys, { now: startedAt, delivered: false });
-
-  // Step 7: format. An empty digest is skipped by default to reduce noise.
+  // Step 7: format. An empty digest posts the "nothing new" note, so the channel
+  // always gets exactly one message per run (DIGEST_POST_EMPTY=false stays silent).
   const itemCount = countDigestItems(digest);
   if (itemCount === 0) {
+    log.info('digest is empty after filtering — nothing qualified for a section');
     if (env.postEmptyDigest) {
-      const note = formatNothingNew(startedAt);
-      if (options.dryRun) {
-        log.info('dry run — would post the "nothing new" note:');
-        console.log(messagesToPlainText(note));
-      } else {
-        await postToDiscord(env.discordWebhookUrl as string, note, { log, timeoutMs: env.fetchTimeoutMs });
-      }
+      await postNothingNew(env, options, log, startedAt);
     } else {
-      log.info('digest is empty after filtering — skipping the post (set DIGEST_POST_EMPTY=true to post a note)');
+      log.info('skipping the post (set DIGEST_POST_EMPTY=true to post a note)');
     }
-    if (!options.dryRun) persistSeen(consideredStore, env.seenStorePath, log);
+    // Only items that reach the Discord message are recorded as seen, so nothing
+    // is stored here — the rejected candidates stay eligible for the next run.
+    if (!options.dryRun) persistSeen(prunedStore, env.seenStorePath, log);
     return 0;
   }
 
@@ -183,11 +207,12 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
   log.info(`posting to ${maskWebhookUrl(env.discordWebhookUrl as string)}`);
   await postToDiscord(env.discordWebhookUrl as string, messages, { log, timeoutMs: env.fetchTimeoutMs });
 
-  const deliveredKeys = CATEGORY_DEFINITIONS.flatMap((definition) =>
-    (digest.categories[definition.key] ?? []).map((item) => seenKey({ url: item.url, id: item.url })),
-  );
-  const updatedStore = markSeen(consideredStore, deliveredKeys, { now: startedAt, delivered: true });
-  persistSeen(updatedStore, env.seenStorePath, log);
+  // Only items that were actually posted count as seen. Candidates that were
+  // merely pre-ranked, or shown to the LLM and rejected, stay eligible for the
+  // rest of the lookback window instead of being silenced before they ever had a
+  // chance to reach the channel.
+  const deliveredKeys = digestSeenKeys(digest);
+  persistSeen(markSeen(prunedStore, deliveredKeys, { now: startedAt, delivered: true }), env.seenStorePath, log);
 
   log.info(
     `run complete: ${deliveredKeys.length} delivered, ${skipped} suppressed, ${fetched.errors.length} source failure(s)`,

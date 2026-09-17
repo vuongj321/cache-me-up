@@ -86,9 +86,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     maxItemsPerSource: intFrom(source.MAX_ITEMS_PER_SOURCE, 12),
     seenStorePath: optional(source.SEEN_STORE_PATH) ?? path.join('data', 'seen.json'),
     seenWindowDays: intFrom(source.SEEN_WINDOW_DAYS, 5),
+    // Only items that were actually posted are written to the cache, so nothing
+    // creates "considered" entries any more; this window merely ages out entries
+    // left behind by earlier versions of the pipeline.
     consideredWindowDays: intFrom(source.CONSIDERED_WINDOW_DAYS, 2),
     logLevel: optional(source.LOG_LEVEL) ?? 'info',
-    postEmptyDigest: boolFrom(source.DIGEST_POST_EMPTY, false),
+    postEmptyDigest: boolFrom(source.DIGEST_POST_EMPTY, true),
     fetchTimeoutMs: intFrom(source.FETCH_TIMEOUT_MS, 20000),
     llmTimeoutMs: intFrom(source.LLM_TIMEOUT_MS, 120000),
     llmMaxOutputTokens: intFrom(source.LLM_MAX_OUTPUT_TOKENS, 6000),
