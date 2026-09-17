@@ -263,3 +263,7 @@ cache-me-up/
 A Discord bot, a web UI, email delivery, multi-channel routing, personalization
 ML, and open-ended agentic web search. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §11.
+
+## License
+
+[MIT](LICENSE) © 2026 Jason Vuong
