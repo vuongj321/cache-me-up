@@ -3,12 +3,15 @@ name: Daily Tech Digest
 # docs/ARCHITECTURE.md section 7 — GitHub Actions provides the "cron".
 on:
   schedule:
-    # GitHub cron is always UTC and cannot follow daylight saving time, so both
-    # hours that can be 5:00 AM local are scheduled and the `gate` job keeps the
-    # one that is today's 05:00 in America/Chicago (10:05 UTC on CDT, 11:05 UTC on CST).
+    # 5:05 AM America/Chicago, year-round. GitHub cron is UTC by default; the
+    # `timezone` key — a sibling of `cron` in the same list item — makes GitHub
+    # evaluate the expression in that IANA zone, so daylight saving time is
+    # handled by GitHub itself. No second cron entry and no gate job needed.
     # Minute :05 dodges GitHub's documented "start of every hour" delay window.
-    - cron: '5 10 * * *'
-    - cron: '5 11 * * *'
+    # US DST switches happen at 02:00 local, so 05:05 local can never land in a
+    # skipped (spring-forward) or repeated (fall-back) hour.
+    - cron: '5 5 * * *'
+      timezone: 'America/Chicago'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -30,69 +33,7 @@ permissions:
   contents: read
 
 jobs:
-  # GitHub cron cannot follow daylight saving time, so both candidate hours are
-  # scheduled above and this job runs only the one that is today's 5:00 AM in the
-  # digest's home timezone. It compares the cron entry that fired — not the wall
-  # clock — so a run that GitHub delayed past the hour is still allowed through.
-  # Manual runs always proceed. No checkout and no npm install: it costs seconds.
-  gate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      run: ${{ steps.decide.outputs.run }}
-
-    steps:
-      - name: Decide whether this is today's 5:00 AM
-        id: decide
-        env:
-          LOCAL_HOUR: '5'
-          LOCAL_TIMEZONE: America/Chicago
-        run: |
-          set -euo pipefail
-
-          # Manual runs never consult the schedule.
-          if [ "${{ github.event_name }}" != 'schedule' ]; then
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # The cron entry that triggered this run, e.g. "5 10 * * *" -> "10".
-          cron_hour="$(awk '{ print $2 }' <<< "${{ github.event.schedule }}")"
-
-          # No cron string to reason about? Fail open: a duplicate digest is
-          # better than a missing one.
-          if [ -z "$cron_hour" ]; then
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Which UTC hour is LOCAL_HOUR:00 in LOCAL_TIMEZONE today? The offset is
-          # read at that local time, so this stays correct on the DST switch-over days.
-          offset="$(TZ="$LOCAL_TIMEZONE" date -d "today ${LOCAL_HOUR}:00" +%z)"
-          offset="${offset//:/}"
-          hours=$(( 10#${offset:1:2} ))
-          if [ "${offset:0:1}" = '-' ]; then
-            utc_hour=$(( (LOCAL_HOUR + hours) % 24 ))
-          else
-            utc_hour=$(( (LOCAL_HOUR - hours + 24) % 24 ))
-          fi
-
-          cron_hour="$(printf '%02d' "$(( 10#$cron_hour ))")"
-          utc_hour="$(printf '%02d' "$utc_hour")"
-
-          if [ "$cron_hour" = "$utc_hour" ]; then
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-            echo "::notice::${cron_hour}:05 UTC is today's ${LOCAL_HOUR}:00 ${LOCAL_TIMEZONE} — running the digest."
-          else
-            echo 'run=false' >> "$GITHUB_OUTPUT"
-            echo "::notice::${cron_hour}:05 UTC is not today's ${LOCAL_HOUR}:00 ${LOCAL_TIMEZONE} (UTC${offset}) — that hour belongs to the other cron entry; skipping."
-          fi
-
   digest:
-    needs: [gate]
-    # The gate declines whichever cron entry is not today's 5:00 AM local; a
-    # skipped job is a success, not a failure.
-    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
