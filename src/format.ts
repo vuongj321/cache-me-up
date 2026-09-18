@@ -44,7 +44,7 @@ export function escapeMarkdown(text: string): string {
   return collapseWhitespace(text ?? '').replace(/[\\*_~`|>[\]]/g, (match) => `\\${match}`);
 }
 
-/** YYYY-MM-DD in UTC (the schedule is UTC-based, see section 7.1). */
+/** YYYY-MM-DD in UTC (the digest's date stamp; see docs/ARCHITECTURE.md section 7.1). */
 export function formatDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
