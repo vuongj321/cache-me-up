@@ -39,9 +39,9 @@ Before diving into the architecture, here are the two external concepts the syst
 A **cron job** is just *a task that runs automatically on a repeating schedule*.
 
 - "Cron" originally refers to the Unix/Linux utility `cron`, whose configuration uses a special syntax of five time fields. For example, `5 5 * * *` means "at minute 5, hour 5, every day, every month, every day of the week" — i.e. **5:05 every day**.
-- You don't need a server running `cron` yourself here. Instead, **GitHub Actions** provides the scheduler. A workflow file in the repo declares the same `cron:` expression, and GitHub's infrastructure wakes up and runs the pipeline at that time.
+- You don't need a server running `cron` yourself here. Instead, a **hosted cron service — [cron-job.org](https://cron-job.org)** — owns the schedule, and **GitHub Actions** does the computing. cron-job.org is an HTTP scheduler: at the appointed minute it makes one `POST` request to GitHub's API asking it to start a workflow, and GitHub then spins up the runner that executes the pipeline (see [7. Scheduling](#7-scheduling-cron-joborg-and-github-actions)). The only thing the scheduler holds is a token that may start that one workflow.
 
-The key idea to remember: *the system does not need to be "always on."* GitHub Actions spins up a fresh, temporary virtual machine on schedule, runs the code once, and tears it down. This keeps the project free and serverless.
+The key idea to remember: *the system does not need to be "always on."* GitHub Actions spins up a fresh, temporary virtual machine when the trigger arrives, runs the code once, and tears it down. This keeps the project free and serverless.
 
 ### 2.2 What is a Discord webhook?
 
@@ -70,7 +70,8 @@ The system is a **linear, one-directional pipeline** of small, independent stage
 
 ```mermaid
 flowchart LR
-  cron[GitHub Actions cron] --> fetch[Fetch feeds]
+  cron[cron-job.org schedule] --> dispatch[GitHub Actions workflow_dispatch]
+  dispatch --> fetch[Fetch feeds]
   fetch --> candidates[Candidate items]
   candidates --> dedupe[Dedupe vs. seen cache]
   dedupe --> rank[Pre-rank candidates]
@@ -97,11 +98,9 @@ Each stage has a single responsibility, which makes the system easy to test and 
 
 ## 4. The pipeline, step by step
 
-### Step 1 — Cron triggers the run
+### Step 1 — The scheduler triggers the run
 
-At **5:00 AM Central Time** each day (the entry fires at minute `5`), GitHub Actions starts the workflow. The schedule entry carries `timezone: 'America/Chicago'`, so GitHub evaluates the cron expression in Central time and daylight saving time is handled for us — see [7.1 What GitHub Actions provides](#71-what-github-actions-provides) and [7.2 What the workflow does](#72-what-the-workflow-does). The run can also be triggered manually via the "Run workflow" button (`workflow_dispatch`).
-
-See [GitHub Actions and scheduling](#7-github-actions-and-scheduling) for the full explanation of how this works.
+At **5:05 AM Central Time** each day, [cron-job.org](https://cron-job.org) calls GitHub's *workflow dispatch* API, and GitHub starts the `digest` workflow. The time (and its timezone, `America/Chicago`) is a setting on the scheduler's job, so Central time — and daylight saving time — stays entirely outside this repository. The run can also be started on demand from the **Run workflow** button or `gh workflow run` — all three paths are the same `workflow_dispatch` trigger. See [7. Scheduling](#7-scheduling-cron-joborg-and-github-actions) and [7.2 What the workflow does](#72-what-the-workflow-does) for the full explanation of how this works.
 
 ### Step 2 — Fetchers pull recent items
 
@@ -313,7 +312,7 @@ cache-me-up/
     util.ts               # URL canonicalization, HTML stripping, truncation helpers
     log.ts                # tiny level-aware logger
   tests/                  # unit tests (node:test, no network required)
-  .github/workflows/daily-digest.yml   # GitHub Actions cron + manual trigger
+  .github/workflows/daily-digest.yml   # dispatch-driven digest (cron-job.org triggers it)
   .github/workflows/ci.yml             # typecheck + tests on push/PR
   .env.example            # template for required environment variables
   README.md               # setup instructions
@@ -334,40 +333,61 @@ cache-me-up/
 
 ---
 
-## 7. GitHub Actions and scheduling
+## 7. Scheduling: cron-job.org and GitHub Actions
 
-### 7.1 What GitHub Actions provides
+### 7.1 What cron-job.org provides
 
-GitHub Actions is a service that runs **workflows** (small programs described in YAML files) in response to **events** — like a push, a pull request, or a **schedule**.
+[cron-job.org](https://cron-job.org) is a hosted cron service: you describe a job in their console (or through their REST API), and their infrastructure makes an HTTP request at the date and time you configured. This project uses exactly one such job.
 
-For this project, the workflow file `.github/workflows/daily-digest.yml` declares two triggers:
+Its role is narrow on purpose. cron-job.org **cannot** run the pipeline — it executes no code, only HTTP requests. What it does is:
 
-1. **Schedule (`cron`)** — one entry, `'5 5 * * *'`, with the optional sibling key `timezone: 'America/Chicago'` (an IANA zone name). GitHub cron runs in **UTC** by default; `timezone` makes GitHub evaluate the expression in that zone instead, which is how the 5:05 AM local time survives the daylight saving switches ([7.2](#72-what-the-workflow-does)).
-2. **Manual (`workflow_dispatch`)** — a button in the GitHub UI to run on demand.
+1. Wait for the configured time — **every day at 05:05**, evaluated in the job's own timezone, `America/Chicago`.
+2. Send a `POST` to GitHub's *"create a workflow dispatch event"* endpoint:
 
-> **Note on schedule accuracy:** GitHub does not guarantee cron workflows fire at the exact minute; they can be delayed (often by a few minutes to over an hour under load), and runs queued at the start of an hour (`:00`) are the most likely to be delayed or dropped — which is why this entry fires at minute `5`. Because the expression is evaluated in `America/Chicago`, the *local* time stays fixed at 5:05 AM all year. The design therefore treats the time as "roughly daily," which is fine for a digest.
+   ```
+   POST https://api.github.com/repos/vuongj321/cache-me-up/actions/workflows/daily-digest.yml/dispatches
+   Authorization: Bearer <fine-grained PAT>
+   {"ref":"main","inputs":{"dry_run":"false","log_level":"info"}}
+   ```
 
-> **Note on time zones:** GitHub schedules run in **UTC** by default, but a `schedule` entry can carry an optional `timezone` key — a sibling of `cron` in the same list item — holding an IANA zone name such as `America/Chicago`. GitHub then evaluates the expression in that zone, so the workflow never has to reason about UTC offsets: 5:05 AM in `America/Chicago` is **10:05 UTC** during Daylight Saving Time (CDT, UTC−5, roughly March to November) and **11:05 UTC** during Central Standard Time (CST, UTC−6), and GitHub picks the correct one on its own. GitHub documents the **spring-forward** behavior explicitly: a schedule that falls inside a skipped local hour is advanced to the next valid time (their example: a 2:30 AM schedule runs at 3:00 AM). The repeated hour on the autumn **fall-back** day is not documented — and it cannot matter here, because US transitions happen at 02:00 local, so a 05:05 local schedule is never skipped and never repeated. Before this key existed the workflow carried *two* cron entries (`5 10 * * *` and `5 11 * * *`) plus a `gate` job that let only today's through; the single zone-aware entry replaces both.
+   The `Authorization` header carries a **personal access token** that may start workflows in this repository: a fine-grained token scoped to this one repository with the *Actions: write* permission. The token lives in the cron-job.org account, never in the repo (see [9. Security](#9-security)).
+3. Read GitHub's answer. `204 No Content` means "dispatch accepted"; `401`/`403` means the token is wrong, expired or revoked.
+
+The workflow declares only `workflow_dispatch`, so that API call is the *only* way the daily run starts (besides the **Run workflow** button and `gh workflow run`). Moving the schedule out of GitHub buys three things:
+
+- **No best-effort queueing.** GitHub does not guarantee that a `schedule:` cron fires on time; runs queued at the top of an hour can be delayed or dropped under load. A dispatch is accepted immediately, and the runner starts as soon as one is free.
+- **No 60-day auto-disable.** GitHub disables a `schedule`-driven workflow when the repository sees no activity for ~60 days. That rule does not apply to `workflow_dispatch`.
+- **A timezone that stays visible.** A job carries its timezone as a first-class setting, so one job covers both CDT (UTC−5) and CST (UTC−6) and daylight saving time is the scheduler's problem. `05:05` local is a safe minute to choose: US DST switches happen at 02:00 local, so the job can never land in a skipped (spring-forward) or repeated (fall-back) hour.
+
+Two consequences are worth remembering:
+
+- **cron-job.org cannot see the outcome of the run.** A `204` only says GitHub accepted the dispatch. Its failure notifications cover dispatch-level problems (bad token, DNS error, timeout) and it auto-disables a job after 25 consecutive failures; a failed *digest* shows up in the repository's **Actions** tab instead.
+- **cron-job.org publishes no punctuality guarantee**, and it ignores custom `User-Agent` headers (the GitHub API requires one — the job sends its own). The first execution of the job should therefore be verified to return `204`.
 
 ### 7.2 What the workflow does
 
-The workflow is a single `digest` job with no conditions: deciding *when* to run is entirely GitHub's job ([7.1](#71-what-github-actions-provides)). Every trigger — the 5:05 AM local schedule or a manual **Run workflow** — runs the pipeline; there is no `gate` job and nothing to skip.
+The workflow is a single `digest` job with no conditions: deciding *when* to run is entirely the scheduler's job ([7.1](#71-what-cron-joborg-provides)). Every trigger — a cron-job.org dispatch, the **Run workflow** button, or `gh workflow run` — runs the pipeline; there is no `gate` job and nothing to skip, because GitHub is never the one choosing the time.
+
+The `dry_run` and `log_level` inputs exist for human-triggered runs; the cron-job.org job explicitly sends `"dry_run":"false"` and `"log_level":"info"` so the scheduled run posts. Values delivered through the API arrive as **strings**, which is why the workflow tests `github.event.inputs.dry_run == 'true'` instead of treating the value as a boolean: the string `"false"` is truthy in workflow expressions, so the naive `inputs.dry_run && …` form would silently turn every dispatched run into a dry run.
 
 Each run of the `digest` job:
 
 1. Spins up a fresh **Ubuntu runner** (temporary virtual machine).
 2. Checks out the repository.
 3. Sets up **Node 20** (`actions/setup-node` with npm caching).
-4. Restores `data/seen.json` from cache (if a previous run saved one).
-5. Runs `npm ci` to install exact dependencies.
+4. Runs `npm ci` to install exact dependencies.
+5. Restores `data/seen.json` from cache (if a previous run saved one).
 6. Runs `npm run digest` (which executes `src/index.ts`).
 7. Saves the updated `data/seen.json` back to cache (only when the step succeeded).
 8. Tears the machine down.
 
-The workflow also accepts a manual **dry run** input plus a `log_level` choice, and a
-`concurrency` group ensures a manual run can never overlap the scheduled one.
+The workflow also accepts a manual **dry run** input plus a `log_level` choice, and
+`concurrency: {group: daily-digest, cancel-in-progress: false}` keeps the runs
+serialized: a cron-job.org retry, a manual run, or an operator re-running a failed
+run waits for the in-flight digest instead of racing it.
 A separate `ci.yml` workflow runs `npm run typecheck` and `npm test` on pushes and
-pull requests, so a broken parser or prompt change is caught before the cron fires.
+pull requests, so a broken parser or prompt change is caught before the schedule
+fires.
 
 ### 7.3 State and caching
 
@@ -387,7 +407,9 @@ the restore step looked for `seen-v2-` — every run started cold). GitHub evict
 entries that have not been read for ~7 days, which naturally makes the seen list
 "short-lived" — old entries fall out of the active window, so very old items are
 allowed to resurface later. This matches the design goal of suppressing repeats for
-"a few days," not forever.
+"a few days," not forever. None of this depends on the trigger: the cache is
+written by the workflow run itself, so it behaves the same whether cron-job.org, the
+**Run workflow** button or `gh workflow run` started the run.
 
 ### 7.4 Running the pipeline outside Actions
 
@@ -400,6 +422,7 @@ debugged:
 | `npm run digest:dry` | Everything except the post; nothing is written to the seen cache |
 | `npm run digest:dry -- --print-candidates` | Also logs every ranked candidate with its score |
 | `npm test` / `npm run typecheck` | Offline unit tests (no network) and type checking |
+| `gh workflow run daily-digest.yml` | Not local: dispatches the real workflow on GitHub — the same call cron-job.org makes, handy for testing the scheduled path |
 
 The CLI accepts `--dry-run` and `--print-candidates`; unknown flags are ignored.
 Without `OPENAI_API_KEY` a dry run deliberately stops after pre-ranking, which is
@@ -442,7 +465,7 @@ This is how the plan maps interests to sources:
 
 ### 8.2 Environment variables
 
-Secrets and tunable settings are provided via environment variables, loaded from a local `.env` file (copied from `.env.example`) for local runs, and via GitHub **Actions secrets** for scheduled runs.
+Secrets and tunable settings are provided via environment variables, loaded from a local `.env` file (copied from `.env.example`) for local runs, and via GitHub **Actions secrets** for the dispatched runs. The scheduler never sees any of these: the cron-job.org job holds only the dispatch token described in [7.1](#71-what-cron-joborg-provides).
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
@@ -474,6 +497,7 @@ secret is absent and where to put it.
 - **`.env` is gitignored.** The `.env.example` file contains *placeholders only*, so developers know which variables to set without exposing real values.
 - **Anti-hallucination URL allowlist** protects users from clicking links the LLM invented (see [Step 6](#step-6--url-allowlist-validation-anti-hallucination)).
 - **Least privilege:** the webhook grants only "post a message" capability — it cannot read the channel, manage the server, or act as a bot with broader permissions.
+- **The dispatch token is a secret too.** The cron-job.org job authenticates with a personal access token, so the scheduler holds a credential that can start workflows in this repository. Keep it as narrow as possible — a fine-grained token limited to this single repository with only *Actions: write*, no other permissions — give it the shortest workable expiry, rotate it before it lapses, and revoke it if the schedule is ever removed. Protect the cron-job.org account with 2FA, and remember that a token sent to a third party should be assumed to be readable by that third party. The pipeline's own secrets (`OPENAI_API_KEY`, `DISCORD_WEBHOOK_URL`) are never shared with the scheduler: they stay in GitHub Actions secrets and are injected only into the runner.
 
 ---
 
@@ -490,6 +514,12 @@ secret is absent and where to put it.
 | Webhook returns 429/5xx | Message not sent | Retried with backoff (`Retry-After` honoured), and webhook URLs are validated before the LLM call is paid for |
 | Digest is empty after filtering | Nothing to say | Posts a "Nothing new worth sharing today." card (default); `DIGEST_POST_EMPTY=false` stays silent |
 | Cache misses / cold start | No dedupe history, so first run may duplicate | Acceptable; subsequent runs rebuild the cache |
+| The dispatch token expires or is revoked | cron-job.org gets `401`/`403`; no run is created, so nothing posts | The scheduler records the HTTP status of every execution and can email on failure; rotate the token before its expiry date ([7.1](#71-what-cron-joborg-provides)) |
+| The cron-job.org job gets auto-disabled (25 consecutive failures) | The digest silently stops arriving | Enable the job's failure email so the disable is visible, then re-enable the job once the cause is fixed |
+| Dispatch accepted (`204`) but the run itself fails | No digest that day, and no scheduler-level signal | The failure is recorded in the **Actions** tab like any other run; re-run it from there |
+| cron-job.org is down or misses a fire | No trigger for that day | Accepted: the design treats the time as "roughly daily". Dispatch manually from the **Actions** tab if the day matters |
+| Two triggers overlap (a retry, a manual run, a re-run) | Two runs could post twice | The `daily-digest` concurrency group makes the second wait (`cancel-in-progress: false`) |
+| The workflow file is missing from the target branch | The API answers `404`, so nothing starts | `ref` is pinned to `main` in the scheduler's body, and the workflow must exist and be enabled on that branch |
 
 ---
 
@@ -508,7 +538,7 @@ These boundaries keep v1 small, cheap, and reliable — a single scheduled scrip
 A single day's run looks like this:
 
 ```
-5:05 AM CT ──► GitHub fires the scheduled entry (timezone: America/Chicago) ──► runner starts
+5:05 AM CT ──► cron-job.org POSTs the dispatch (timezone: America/Chicago) ──► runner starts
                 ├─ checkout repo, setup Node 20, npm ci
                 ├─ restore data/seen.json from cache
                 ├─ npm run digest
@@ -525,7 +555,7 @@ A single day's run looks like this:
                 └─ runner is torn down
 ```
 
-The architecture's key strengths are its **linear simplicity** (easy to reason about), **stage isolation** (each part is independently testable and replaceable), and **configuration-driven sources** (adding feeds doesn't require code changes). The two "dumb pipes" — GitHub Actions cron and the Discord webhook — handle scheduling and delivery for free, so the project itself only has to solve the interesting middle: *gathering, filtering, and summarizing*.
+The architecture's key strengths are its **linear simplicity** (easy to reason about), **stage isolation** (each part is independently testable and replaceable), and **configuration-driven sources** (adding feeds doesn't require code changes). The two "dumb pipes" — the cron-job.org schedule and the Discord webhook — handle triggering and delivery for free, so the project itself only has to solve the interesting middle: *gathering, filtering, and summarizing*.
 
 
 

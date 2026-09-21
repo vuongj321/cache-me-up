@@ -4,8 +4,9 @@ An automated daily digest of tech/AI news that lands in a Discord channel every 
 
 It **fetches** recent items from a curated set of RSS feeds and APIs, **filters and
 categorizes** them with an LLM into four reader-friendly sections, **formats** the
-result as one Discord message, and **posts** it via a webhook — all on a GitHub
-Actions schedule, with no server to run.
+result as one Discord message, and **posts** it via a webhook — all on a
+[cron-job.org](https://cron-job.org) schedule that dispatches a GitHub Actions run,
+with no server to run.
 
 > New to cron jobs, webhooks or the overall design? Read
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first — it explains every external
@@ -42,7 +43,8 @@ is split:
 ## How it works
 
 ```
-GitHub Actions cron ─► fetch feeds/APIs ─► dedupe vs. seen cache ─► pre-rank & cap
+cron-job.org ─► GitHub Actions (workflow_dispatch) ─► fetch feeds/APIs
+      ─► dedupe vs. seen cache ─► pre-rank & cap
       ─► LLM filter + categorize + summarize ─► URL allowlist check
       ─► format section cards ─► Discord webhook POST
 ```
@@ -154,9 +156,13 @@ Copy `.env.example` to `.env` for local runs, or use GitHub secrets (below).
 | `LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `GITHUB_TOKEN` | no | — | Raises the GitHub search API rate limit |
 
-## Deploying with GitHub Actions
+## Deploying: cron-job.org + GitHub Actions
 
-`.github/workflows/daily-digest.yml` runs on a schedule and on demand.
+`.github/workflows/daily-digest.yml` has no `schedule:` entry of its own. The
+schedule lives in [cron-job.org](https://cron-job.org), which sends one HTTP
+request a day to GitHub's "create a workflow dispatch event" endpoint; that
+starts the workflow's `workflow_dispatch` trigger. Only the clock moved — the
+runner, the pipeline steps and the dedupe cache are unchanged.
 
 **1. Create a Discord webhook**
 
@@ -179,22 +185,67 @@ to the channel.
 **Run workflow** — with *dry run* ticked first if you want to see the output
 without posting.
 
-**Schedule:** **5:00 AM Central Time**, year-round — the cron entry fires at
-minute `5`, so 5:05 AM local:
+**5. Create a dispatch token.** The scheduler needs permission to start the
+workflow, so give it a **fine-grained personal access token**:
 
-```yaml
-- cron: '5 5 * * *'
-  timezone: 'America/Chicago'
-```
+- Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → *Generate new token*
+- **Repository access:** only `cache-me-up` (never "all repositories")
+- **Permissions:** *Repository permissions* → **Actions → Read and write**. Nothing else.
+- **Expiration:** as short as you are willing to rotate (e.g. 90 days)
 
-`timezone` is an optional sibling of `cron` that makes GitHub evaluate the
-expression against that IANA zone, so daylight saving time is GitHub's problem
-rather than the workflow's: one entry covers both CDT (UTC−5) and CST (UTC−6),
-with no duplicated cron entries and no gate job. Minute `5` is deliberate —
-GitHub documents the start of every hour as a high-load window where queued runs
-can be delayed or dropped. US DST switches happen at 02:00 local, so a 05:05
-local schedule can never land in a skipped (spring-forward) or repeated
-(fall-back) hour.
+A classic token also works: `repo` scope for a private repository, `public_repo`
+for a public one. Treat the token as a secret — it lets whoever holds it start
+workflows here.
+
+**6. Create the cron-job.org job.** In the cron-job.org console, create a job (or
+use their [REST API](https://docs.cron-job.org/rest-api.html)) with:
+
+| Field | Value |
+| --- | --- |
+| URL | `https://api.github.com/repos/vuongj321/cache-me-up/actions/workflows/daily-digest.yml/dispatches` |
+| Request method | `POST` |
+| Request body | `{"ref":"main","inputs":{"dry_run":"false","log_level":"info"}}` |
+| Header | `Authorization: Bearer <fine-grained PAT>` |
+| Header | `Accept: application/vnd.github+json` |
+| Header | `Content-Type: application/json` |
+| Header | `X-GitHub-Api-Version: 2022-11-28` |
+| Schedule | every day at `05:05`, timezone **America/Chicago** |
+| Notifications | *"notify me when the job fails"* enabled |
+
+Notes on that configuration:
+
+- **The timezone does the DST work.** cron-job.org schedules each job in the
+  timezone you pick, so `05:05` stays 5:05 AM local year-round — one job instead
+  of the CDT/CST pair a UTC-only scheduler would need.
+- **`204 No Content` means "dispatch accepted"**, not "the digest was posted".
+  The workflow runs asynchronously, so a green history entry only says GitHub
+  took the request. Watch the **Actions** tab for the outcome; cron-job.org's
+  failure email covers what it *can* see — a revoked/expired token (`401`/`403`),
+  a DNS error or a timeout.
+- **cron-job.org ignores custom `User-Agent` headers** (a documented limitation)
+  and sends its own; the GitHub API requires *a* user agent, so confirm the first
+  execution returns `204`. A `403` mentioning the user agent would mean the
+  request arrived without one.
+- **`inputs` values are strings.** The API delivers them as strings, which is why
+  the workflow tests `github.event.inputs.dry_run == 'true'` instead of using
+  `inputs.dry_run` as a boolean — the string `"false"` is truthy in workflow
+  expressions.
+- **Retries are safe.** The workflow's `concurrency` group (`daily-digest`,
+  `cancel-in-progress: false`) makes a retry or a manual run wait for the
+  in-flight digest instead of racing it.
+- **cron-job.org auto-disables a job** after 25 consecutive failures (a revoked
+  token looks exactly like that). Turn the failure email on so you hear about it,
+  then re-enable the job once the token is replaced.
+- **Test it before trusting the schedule:** press cron-job.org's *Test run*
+  button (expect `204` plus a new run in the Actions tab), or dispatch it
+  yourself:
+
+  ```bash
+  gh workflow run daily-digest.yml -F dry_run=false -F log_level=info
+  ```
+
+  (`-F` sends a typed field, so `dry_run` arrives as a boolean there and as the
+  string `"false"` from cron-job.org — the workflow handles both.)
 
 **Dedupe cache:** runners are ephemeral, so `data/seen.json` is restored at the
 start of each run and saved at the end via `actions/cache`. Every run writes a new
@@ -236,7 +287,7 @@ cache-me-up/
     util.ts / log.ts           # small shared helpers
   tests/                       # unit tests (no network access required)
   .github/workflows/ci.yml             # typecheck + tests on push/PR
-  .github/workflows/daily-digest.yml   # the daily cron (5:05 AM CT via schedule timezone)
+  .github/workflows/daily-digest.yml   # the daily digest (dispatched by cron-job.org)
 ```
 
 ## Troubleshooting
@@ -251,14 +302,17 @@ cache-me-up/
 | Nothing was posted | Either `DIGEST_POST_EMPTY=false`, or nothing qualified. The default posts a "Nothing new worth sharing today" card |
 | Links look short/rewritten | Not possible: any URL that was not in the fetched candidate set is dropped by the allowlist |
 | Digest arrives in several messages | Working as intended — Discord allows 10 embeds / 6000 characters of embeds per message. Each section is one card, and continuation messages never repeat a header |
-| The scheduled run never appears in the Actions tab | GitHub queues schedules best-effort: lots of runs queue at the top of the hour, so minute `:00` entries are the ones most likely to be delayed or dropped under load (the workflow uses minute `5` for that reason). GitHub also auto-disables a `cron` workflow after ~60 days without repository activity. **Run workflow** always posts |
+| The digest never arrives / no run appears in the Actions tab | Check cron-job.org's execution history first: `401`/`403` means the dispatch token expired or was revoked, and cron-job.org disables a job after 25 consecutive failures (enable its failure email). If the job reports `204`, GitHub accepted the dispatch — then look in the Actions tab, where an LLM or webhook failure is logged |
+| cron-job.org reports success but nothing was posted | `204` only means "dispatch accepted". The digest run itself failed or chose not to post — check the Actions run log (`DIGEST_POST_EMPTY=false` is the usual reason for silence) |
 
 ## Costs and limits
 
 - One LLM request per day, carrying at most `maxCandidates` (30) short items —
   typically a fraction of a cent with a small model.
 - Everything else is free: GitHub Actions minutes (well within the free tier),
-  public feeds/APIs, and a Discord webhook.
+  public feeds/APIs, a Discord webhook, and the cron-job.org schedule — one GitHub
+  API call a day, far inside the 5,000 requests/hour limit for an authenticated
+  token.
 - Set `LOG_LEVEL=debug` (or dispatch the workflow with `log_level: debug`) to see
   per-source item counts.
 - Only items that reached the posted message enter the dedupe cache, so a run that
